@@ -22,13 +22,13 @@ sudo -v
 
 echo ""
 echo "[1/3] Preparing driver binary..."
-if [ -f edimax_driver ]; then
-    echo "      Using existing Universal Binary."
-elif which clang >/dev/null 2>&1; then
-    echo "      Compiling Universal Binary (Apple Silicon & Intel)..."
+if which clang >/dev/null 2>&1; then
+    echo "      Compiling latest Universal Binary (Apple Silicon & Intel)..."
     clang -O2 -arch arm64 -arch x86_64 \
         -framework IOKit -framework CoreFoundation -lpthread \
         edimax_driver.c -o edimax_driver
+elif [ -f edimax_driver ]; then
+    echo "      Using existing pre-compiled Universal Binary."
 else
     echo "[-] Error: edimax_driver binary not found and clang compiler is not installed."
     echo "    Please install Xcode Command Line Tools: xcode-select --install"
