@@ -2,22 +2,22 @@
 # ============================================================================
 #  Edimax EU-4308 One-Click Installer for macOS
 # ============================================================================
-set -e
-
 cd "$(dirname "$0")"
+
+trap 'echo ""; echo "[-] Installation aborted or failed. See error above."; echo ""; read -p "Press [Enter] to exit..." dummy; exit 1' ERR
 
 echo "===================================================================="
 echo "   Edimax EU-4308 (ASIX AX88179) Driver Installation                "
 echo "===================================================================="
 echo ""
 echo "This installer will:"
-echo "  1. Compile a native Universal Binary (Apple Silicon & Intel)"
+echo "  1. Prepare the Universal Binary (Apple Silicon & Intel)"
 echo "  2. Install the driver to /usr/local/bin/edimax_driver"
 echo "  3. Configure a background service so it starts automatically on boot"
 echo ""
 
-# Prompt for sudo
-echo "Please enter your administrator password if prompted:"
+# Prompt for sudo password
+echo "Please authenticate with your administrator password or Touch ID:"
 sudo -v
 
 echo ""
@@ -35,7 +35,7 @@ else
     exit 1
 fi
 
-echo "[2/3] Installing binary..."
+echo "[2/3] Installing binary to /usr/local/bin..."
 sudo mkdir -p /usr/local/bin
 sudo install -m 755 edimax_driver /usr/local/bin/edimax_driver
 
@@ -54,12 +54,12 @@ echo "===================================================================="
 echo "   [SUCCESS] Edimax EU-4308 Driver installed successfully!           "
 echo "===================================================================="
 echo ""
-echo "The driver is now running in the background and will start automatically"
-echo "every time your Mac turns on."
+echo "The driver is now running in the background."
+echo "NO REBOOT is needed! The network interface is active immediately."
 echo ""
 echo "To check the live driver logs, run:"
 echo "  tail -f /var/log/edimax_driver.log"
 echo ""
-echo "To uninstall at any time, run: ./Uninstall.command"
+echo "To uninstall at any time, run: ./Uninstall.command (or make uninstall)"
 echo ""
-read -p "Press [Enter] to exit..."
+read -p "Press [Enter] to finish..." dummy
