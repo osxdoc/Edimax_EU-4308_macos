@@ -24,7 +24,8 @@ run: $(TARGET)
 install: $(TARGET)
 	@echo "==> Installing binary to /usr/local/bin..."
 	sudo mkdir -p /usr/local/bin
-	sudo install -m 755 $(TARGET) /usr/local/bin/$(TARGET)
+	sudo cp -f $(TARGET) /usr/local/bin/$(TARGET)
+	sudo chmod 755 /usr/local/bin/$(TARGET)
 	@echo "==> Installing launchd service..."
 	sudo cp services/$(PLIST) /Library/LaunchDaemons/$(PLIST)
 	sudo chown root:wheel /Library/LaunchDaemons/$(PLIST)

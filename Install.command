@@ -37,7 +37,8 @@ fi
 
 echo "[2/3] Installing binary to /usr/local/bin..."
 sudo mkdir -p /usr/local/bin
-sudo install -m 755 edimax_driver /usr/local/bin/edimax_driver
+sudo cp -f edimax_driver /usr/local/bin/edimax_driver
+sudo chmod 755 /usr/local/bin/edimax_driver
 
 echo "[3/3] Setting up background service (launchd)..."
 PLIST="com.edimax.ax88179.driver.plist"
