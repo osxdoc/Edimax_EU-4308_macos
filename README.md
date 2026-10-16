@@ -81,9 +81,19 @@ Press `Ctrl+C` to stop the driver.
 
 ---
 
-## Permanent Installation (Background Service)
+## Easy One-Click Installation (For End Users)
 
-To run the driver automatically in the background on system boot without keeping a terminal open:
+You don't need to use the terminal. In the Finder:
+1. Double-click **`Install.command`**
+2. Enter your macOS administrator password (or Touch ID) when prompted.
+3. Done! The driver runs as an automatic background service on every boot. **No reboot required.**
+
+To uninstall:
+* Double-click **`Uninstall.command`** (or run `make uninstall`).
+
+---
+
+## Permanent Installation (CLI / Terminal)
 
 ```bash
 make install
@@ -95,6 +105,10 @@ This installs the binary to `/usr/local/bin/edimax_driver` and registers a `laun
 ```bash
 tail -f /var/log/edimax_driver.log
 ```
+
+### macOS System Settings Integration
+Under **System Settings → Network**, the adapter appears as **AX88179**. 
+* Set IPv4 to **Manually** (e.g. IP `10.10.10.158`, Subnet `255.255.255.0`, Router `10.10.10.1`, DNS `10.10.10.1` or `10.10.10.32`) to have macOS show a permanent **green status indicator** and automatically route internet traffic through the adapter when Wi-Fi is disabled.
 
 ### Uninstall
 ```bash
