@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# ============================================================================
+#  Edimax EU-4308 One-Click Installer for macOS
+# ============================================================================
+set -e
+
+cd "$(dirname "$0")"
+
+echo "===================================================================="
+echo "   Edimax EU-4308 (ASIX AX88179) Driver Installation                "
+echo "===================================================================="
+echo ""
+echo "This installer will:"
+echo "  1. Compile a native Universal Binary (Apple Silicon & Intel)"
+echo "  2. Install the driver to /usr/local/bin/edimax_driver"
+echo "  3. Configure a background service so it starts automatically on boot"
+echo ""
+
+# Prompt for sudo
+echo "Please enter your administrator password if prompted:"
+sudo -v
+
+echo ""
+echo "[1/3] Preparing driver binary..."
+if [ -f edimax_driver ]; then
+    echo "      Using existing Universal Binary."
+elif which clang >/dev/null 2>&1; then
+    echo "      Compiling Universal Binary (Apple Silicon & Intel)..."
+    clang -O2 -arch arm64 -arch x86_64 \
+        -framework IOKit -framework CoreFoundation -lpthread \
+        edimax_driver.c -o edimax_driver
+else
+    echo "[-] Error: edimax_driver binary not found and clang compiler is not installed."
+    echo "    Please install Xcode Command Line Tools: xcode-select --install"
+    exit 1
+fi
+
+echo "[2/3] Installing binary..."
+sudo mkdir -p /usr/local/bin
+sudo install -m 755 edimax_driver /usr/local/bin/edimax_driver
+
+echo "[3/3] Setting up background service (launchd)..."
+PLIST="com.edimax.ax88179.driver.plist"
+sudo cp "services/${PLIST}" "/Library/LaunchDaemons/${PLIST}"
+sudo chown root:wheel "/Library/LaunchDaemons/${PLIST}"
+sudo chmod 644 "/Library/LaunchDaemons/${PLIST}"
+
+# Bootout old if existing, then bootstrap
+sudo launchctl bootout system "/Library/LaunchDaemons/${PLIST}" 2>/dev/null || true
+sudo launchctl bootstrap system "/Library/LaunchDaemons/${PLIST}" 2>/dev/null || sudo launchctl load "/Library/LaunchDaemons/${PLIST}"
+
+echo ""
+echo "===================================================================="
+echo "   [SUCCESS] Edimax EU-4308 Driver installed successfully!           "
+echo "===================================================================="
+echo ""
+echo "The driver is now running in the background and will start automatically"
+echo "every time your Mac turns on."
+echo ""
+echo "To check the live driver logs, run:"
+echo "  tail -f /var/log/edimax_driver.log"
+echo ""
+echo "To uninstall at any time, run: ./Uninstall.command"
+echo ""
+read -p "Press [Enter] to exit..."
