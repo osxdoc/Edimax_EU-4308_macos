@@ -1,5 +1,5 @@
 CC ?= clang
-CFLAGS ?= -O2 -Wall -Wextra
+CFLAGS ?= -O2 -Wall -Wextra -arch arm64 -arch x86_64
 LDFLAGS = -framework IOKit -framework CoreFoundation -lpthread
 
 TARGET = edimax_driver
@@ -22,6 +22,11 @@ run: $(TARGET)
 	sudo ./$(TARGET)
 
 install: $(TARGET)
+	@echo "==> Stopping any existing driver instance..."
+	-sudo launchctl bootout system services/$(PLIST) 2>/dev/null || true
+	-sudo launchctl bootout system /Library/LaunchDaemons/$(PLIST) 2>/dev/null || true
+	-sudo launchctl unload /Library/LaunchDaemons/$(PLIST) 2>/dev/null || true
+	-sudo killall -9 $(TARGET) 2>/dev/null || true
 	@echo "==> Installing binary to /usr/local/bin..."
 	sudo mkdir -p /usr/local/bin
 	sudo cp -f $(TARGET) /usr/local/bin/$(TARGET)

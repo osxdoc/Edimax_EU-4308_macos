@@ -36,6 +36,8 @@ else
 fi
 
 echo "[2/3] Installing binary to /usr/local/bin..."
+sudo launchctl bootout system "/Library/LaunchDaemons/${PLIST}" 2>/dev/null || true
+sudo killall -9 edimax_driver 2>/dev/null || true
 sudo mkdir -p /usr/local/bin
 sudo cp -f edimax_driver /usr/local/bin/edimax_driver
 sudo chmod 755 /usr/local/bin/edimax_driver
