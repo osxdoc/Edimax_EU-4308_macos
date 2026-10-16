@@ -1,0 +1,16 @@
+# Compiled binaries
+edimax_driver
+tools/dump_mii
+*.o
+
+# macOS metadata
+.DS_Store
+*.dSYM/
+.AppleDouble
+.LSOverride
+
+# Editor & IDE files
+.vscode/
+.idea/
+*.swp
+*~
