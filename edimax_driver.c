@@ -381,12 +381,20 @@ static IOUSBInterfaceInterface **claim_interface(IOUSBDeviceInterface **dev) {
 // ============================================================================
 static void sync_system_routing_and_dns(void) {
     char router[32] = {0};
-    char dns[32] = {0};
+    char dns[64] = {0};
+    char ip[32] = {0};
 
     FILE *fp_r = popen("ipconfig getoption feth0 router 2>/dev/null", "r");
     if (fp_r) {
         if (fgets(router, sizeof(router), fp_r)) router[strcspn(router, "\r\n")] = 0;
         pclose(fp_r);
+    }
+    if (strlen(router) == 0) {
+        FILE *fp = popen("printf 'show State:/Network/Service/DHCP-feth0/IPv4\\n' | scutil | awk -F': ' '/Router/ {print $2}'", "r");
+        if (fp) {
+            if (fgets(router, sizeof(router), fp)) router[strcspn(router, "\r\n")] = 0;
+            pclose(fp);
+        }
     }
 
     FILE *fp_d = popen("ipconfig getoption feth0 domain_name_server 2>/dev/null", "r");
@@ -394,10 +402,35 @@ static void sync_system_routing_and_dns(void) {
         if (fgets(dns, sizeof(dns), fp_d)) dns[strcspn(dns, "\r\n")] = 0;
         pclose(fp_d);
     }
+    if (strlen(dns) == 0 && strlen(router) > 0) {
+        strncpy(dns, router, sizeof(dns) - 1);
+    }
+
+    FILE *fp_ip = popen("ipconfig getifaddr feth0 2>/dev/null", "r");
+    if (fp_ip) {
+        if (fgets(ip, sizeof(ip), fp_ip)) ip[strcspn(ip, "\r\n")] = 0;
+        pclose(fp_ip);
+    }
+
+    char cmd[512];
+
+    // Mark link active in dynamic store
+    system("printf 'd.init\\nd.add Link TRUE\\nset State:/Network/Interface/feth0/Link\\n' | scutil >/dev/null 2>&1");
+
+    // Publish to System Settings service (AX88179) so it displays GREEN in macOS Settings
+    if (strlen(ip) > 0 && strlen(router) > 0) {
+        snprintf(cmd, sizeof(cmd),
+                 "printf 'd.init\\nd.add Addresses * %s\\nd.add SubnetMasks * 255.255.255.0\\nd.add Router %s\\nd.add InterfaceName feth0\\nset State:/Network/Service/94D0AB8D-4EEC-4A7B-8DF8-C28FBE913B74/IPv4\\n' | scutil >/dev/null 2>&1",
+                 ip, router);
+        system(cmd);
+
+        snprintf(cmd, sizeof(cmd),
+                 "printf 'd.init\\nd.add ServerAddresses * %s %s\\nd.add DomainName fritz.box\\nset State:/Network/Service/94D0AB8D-4EEC-4A7B-8DF8-C28FBE913B74/DNS\\n' | scutil >/dev/null 2>&1",
+                 dns, router);
+        system(cmd);
+    }
 
     if (strlen(router) > 0) {
-        char cmd[512];
-
         // 1. Resolve router MAC address from DHCP lease and populate ARP cache for feth0
         char router_mac[32] = {0};
         FILE *fp_m = popen("printf 'show State:/Network/Service/DHCP-feth0/IPv4\\n' | scutil | awk -F': ' '/ARPResolvedHardwareAddress/ {print $2}'", "r");
@@ -420,15 +453,14 @@ static void sync_system_routing_and_dns(void) {
 
         // 3. Declare feth0 as primary internet connection in SystemConfiguration
         snprintf(cmd, sizeof(cmd),
-                 "printf 'd.init\\nd.add PrimaryInterface feth0\\nd.add Router %s\\nset State:/Network/Global/IPv4\\n' | scutil",
+                 "printf 'd.init\\nd.add PrimaryInterface feth0\\nd.add Router %s\\nset State:/Network/Global/IPv4\\n' | scutil >/dev/null 2>&1",
                  router);
         system(cmd);
     }
 
     if (strlen(dns) > 0) {
-        char cmd[512];
         snprintf(cmd, sizeof(cmd),
-                 "printf 'd.init\\nd.add ServerAddresses * %s\\nd.add DomainName fritz.box\\nd.add __FLAGS__ 6\\nset State:/Network/Global/DNS\\n' | scutil",
+                 "printf 'd.init\\nd.add ServerAddresses * %s\\nd.add DomainName fritz.box\\nd.add __FLAGS__ 6\\nset State:/Network/Global/DNS\\n' | scutil >/dev/null 2>&1",
                  dns);
         system(cmd);
     }
