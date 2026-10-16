@@ -268,22 +268,29 @@ static void *tx_worker_thread(void *arg) {
                 uint32_t frame_len = hdr->bh_caplen;
 
                 if (frame_len > 0 && frame_len <= 1514) {
+                    // Minimum Ethernet frame size is 60 bytes (excluding FCS). Pad small frames (e.g. ARP = 42 bytes)
+                    uint32_t actual_len = (frame_len < 60) ? 60 : frame_len;
+
                     // AX88179 8-byte TX Header
-                    uint32_t tx_hdr1 = frame_len;
+                    // Bit 31 (0x80000000) disables hardware checksumming so ARP and raw frames are not dropped
+                    uint32_t tx_hdr1 = (actual_len & 0x0001FFFF) | 0x80000000;
                     uint32_t tx_hdr2 = 0;
-                    if (((frame_len + 8) % 512) == 0) {
+                    if (((actual_len + 8) % 1024) == 0 || ((actual_len + 8) % 512) == 0) {
                         tx_hdr2 |= 0x80008000;
                     }
 
                     memcpy(tx_buf, &tx_hdr1, 4);
                     memcpy(tx_buf + 4, &tx_hdr2, 4);
                     memcpy(tx_buf + 8, frame, frame_len);
+                    if (actual_len > frame_len) {
+                        memset(tx_buf + 8 + frame_len, 0, actual_len - frame_len);
+                    }
 
-                    UInt32 tx_total = 8 + frame_len;
+                    UInt32 tx_total = 8 + actual_len;
                     kern_return_t kr = (*g_intf)->WritePipeTO(g_intf, USB_PIPE_BULK_OUT, tx_buf, tx_total, 100, 100);
                     if (kr == KERN_SUCCESS) {
                         g_tx_packets++;
-                        g_tx_bytes += frame_len;
+                        g_tx_bytes += actual_len;
                     }
                 }
                 ptr += BPF_WORDALIGN(hdr->bh_hdrlen + hdr->bh_caplen);
@@ -388,9 +395,10 @@ int main(int argc, char **argv) {
     ax_write_cmd(g_dev, AX_ACCESS_MAC, AX_PAUSE_WATERLVL_LOW, 1, 1, &wlow);
     ax_write_cmd(g_dev, AX_ACCESS_MAC, AX_PAUSE_WATERLVL_HIGH, 1, 1, &whigh);
 
-    uint8_t coe = AX_COE_ALL;
-    ax_write_cmd(g_dev, AX_ACCESS_MAC, AX_RXCOE_CTL, 1, 1, &coe);
-    ax_write_cmd(g_dev, AX_ACCESS_MAC, AX_TXCOE_CTL, 1, 1, &coe);
+    uint8_t rx_coe = AX_COE_ALL;
+    uint8_t tx_coe = 0; // Disable TX checksum engine on chip: OS computes checksums, avoids dropping ARP/ICMP
+    ax_write_cmd(g_dev, AX_ACCESS_MAC, AX_RXCOE_CTL, 1, 1, &rx_coe);
+    ax_write_cmd(g_dev, AX_ACCESS_MAC, AX_TXCOE_CTL, 1, 1, &tx_coe);
 
     uint16_t rxctl = AX_RX_CTL_DROPCRCERR | AX_RX_CTL_IPE | AX_RX_CTL_START |
                      AX_RX_CTL_AP | AX_RX_CTL_AMALL | AX_RX_CTL_AB;
@@ -452,9 +460,8 @@ int main(int argc, char **argv) {
     system(cmd);
     system("ifconfig feth1 up");
     system("ifconfig feth0 up");
-    system("ipconfig set feth0 DHCP");
 
-    // 5. Open BPF on feth1
+    // 5. Open BPF on feth1 BEFORE launching workers
     g_bpf_fd = open_bpf_on_interface("feth1");
     if (g_bpf_fd < 0) {
         fprintf(stderr, "[-] Failed to attach BPF tap to feth1.\n");
@@ -462,14 +469,20 @@ int main(int argc, char **argv) {
     }
     printf("[+] Network bridge established: macOS [feth0] <---> [feth1] <---> Edimax AX88179\n");
 
-    // 6. Launch RX and TX Workers
+    // 6. Launch RX and TX Workers BEFORE DHCP so DHCP packets are exchanged immediately
     pthread_t rx_thread, tx_thread;
     pthread_create(&rx_thread, NULL, rx_worker_thread, NULL);
     pthread_create(&tx_thread, NULL, tx_worker_thread, NULL);
 
+    // 7. Request DHCP from network
+    printf("[*] Acquiring IP address via DHCP...\n");
+    system("ipconfig set feth0 DHCP");
+    system("sleep 1");
+    system("ROUTER=$(ipconfig getoption feth0 router 2>/dev/null); if [ -n \"$ROUTER\" ]; then route add default \"$ROUTER\" 2>/dev/null || route change default \"$ROUTER\" 2>/dev/null || true; fi");
+
     printf("\n[+] Driver is running! Press Ctrl+C to terminate.\n\n");
 
-    // 7. Supervision Loop
+    // 8. Supervision Loop
     int prev_link = -1;
     while (g_running) {
         ax_mdio_read(g_dev, MII_BMSR);
@@ -493,7 +506,10 @@ int main(int argc, char **argv) {
                g_rx_packets, g_rx_bytes / 1024,
                g_tx_packets, g_tx_bytes / 1024,
                link ? (is_giga ? "1000M" : "100M") : "DOWN");
-        fflush(stdout);
+        static int route_check_counter = 0;
+        if (++route_check_counter % 3 == 0 && link) {
+            system("ROUTER=$(ipconfig getoption feth0 router 2>/dev/null); if [ -n \"$ROUTER\" ]; then route add default \"$ROUTER\" 2>/dev/null || true; fi");
+        }
 
         sleep(1);
     }
