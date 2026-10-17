@@ -10,17 +10,18 @@ This repository implements an experimental macOS userspace driver for Edimax EU-
 - `Install.command` and `Uninstall.command`: Finder-friendly Bash installers.
 - `Makefile`: build and service lifecycle commands; `README.md`: user setup instructions.
 
-`tests/test_driver.c` checks packet handling; `tests/test_service.sh` checks installers with isolated system-command mocks. There is no asset directory.
+`tests/` checks packet handling, installers, and release packages. `tools/package.sh` creates ZIPs in ignored `dist/`; `VERSION` defines release versions.
 
 ## Build, Test, and Development Commands
 
-Use macOS with Xcode Command Line Tools (`clang`, `make`). Builds use IOKit, CoreFoundation, SystemConfiguration, and pthreads, with no external dependencies.
+Use macOS with Xcode Command Line Tools (`clang`, `make`). Builds use IOKit, CoreFoundation, SystemConfiguration, and pthreads, without external dependencies.
 
 - `make`: build the universal `edimax_driver` binary for arm64 and x86_64.
 - `make tools`: build `tools/dump_mii`.
 - `make test`: run sanitizer-backed regression tests and configuration syntax checks.
+- `make package`: create the universal binary ZIP and SHA-256 checksum.
 - `make run` or `sudo ./edimax_driver`: run interactively; stop with Ctrl+C.
-- `make install` / `make uninstall`: build the helper and install or remove the launchd service; requires administrator access.
+- `make install` / `make uninstall`: build and manage the launchd service; requires administrator access. Binary ZIP scripts require no compiler.
 - `make clean`: remove generated binaries.
 
 ## Coding Style & Naming Conventions

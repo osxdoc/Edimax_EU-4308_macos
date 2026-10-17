@@ -8,10 +8,17 @@ label=com.edimax.ax88179.driver
 plist=/Library/LaunchDaemons/$label.plist
 binary=/usr/local/bin/edimax_driver
 helper="$repo_dir/edimax_driver"
-[[ -x "$helper" ]] || { echo 'Build the current driver with make before installing or uninstalling.' >&2; exit 1; }
+[[ -x "$helper" ]] || { echo 'Driver missing. Re-extract the binary release or build the source with make.' >&2; exit 1; }
+if [[ ! -f "$repo_dir/edimax_driver.c" ]]; then
+    (cd "$repo_dir" && /usr/bin/shasum -a 256 -c SHA256SUMS)
+fi
 if [[ $1 == install ]]; then
     [[ -f "$repo_dir/services/$label.plist" ]]
     plutil -lint "$repo_dir/services/$label.plist"
+fi
+# Check that macOS can execute this build before stopping a working installation.
+"$helper" --version
+if [[ $1 == install ]]; then
     mkdir -p /usr/local/bin
     staged=$(mktemp /usr/local/bin/.edimax_driver.XXXXXX)
     trap 'rm -f "$staged"' EXIT

@@ -2,6 +2,7 @@
 edimax_driver
 tools/dump_mii
 tests/test_driver
+/dist/
 *.o
 
 # macOS metadata

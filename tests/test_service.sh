@@ -12,6 +12,7 @@ sed -e '/^\[\[ \$EUID -eq 0 \]\]/d' \
     -e 's|/Library/LaunchDaemons|$TEST_ROOT/LaunchDaemons|g' \
     "$repo_dir/tools/service.sh" > "$test_root/repo with spaces/tools/service.sh"
 cp "$repo_dir/services/com.edimax.ax88179.driver.plist" "$test_root/repo with spaces/services/"
+touch "$test_root/repo with spaces/edimax_driver.c"
 cat > "$test_root/mock/command" <<'MOCK'
 #!/bin/bash
 set -eu
@@ -38,7 +39,11 @@ for command in launchctl pgrep pkill sleep chown; do ln -s command "$test_root/m
 cat > "$test_root/repo with spaces/edimax_driver" <<'HELPER'
 #!/bin/bash
 printf 'helper %s\n' "$*" >> "$TEST_ROOT/events"
-case "$1" in --configure-network|--disable-network) ;; *) exit 1 ;; esac
+case "$1" in
+    --version) [[ ${BAD_VERSION:-0} == 0 ]] ;;
+    --configure-network|--disable-network) ;;
+    *) exit 1 ;;
+esac
 HELPER
 chmod +x "$test_root/repo with spaces/edimax_driver"
 service="$test_root/repo with spaces/tools/service.sh"
@@ -62,7 +67,13 @@ grep -qx 'old binary' "$binary"
 grep -qx 'old plist' "$plist"
 [[ -f "$test_root/loaded" ]]
 ! grep -q '^launchctl bootout' "$test_root/events"
-! grep -q '^helper ' "$test_root/events"
+! grep -Eq '^helper --(configure|disable)-network' "$test_root/events"
+
+# A binary that cannot run must not stop the current service.
+: > "$test_root/events"
+if BAD_VERSION=1 bash "$service" install > "$test_root/output" 2>&1; then echo 'Incompatible binary accepted'; exit 1; fi
+[[ -f "$test_root/loaded" && -f "$test_root/running" ]]
+! grep -q '^launchctl ' "$test_root/events"
 
 # Installation stops before unloading and uses the staged current executable.
 : > "$test_root/events"
@@ -90,4 +101,13 @@ grep -qx 'helper --disable-network' "$test_root/events"
 : > "$test_root/events"
 bash "$service" uninstall > "$test_root/output" 2>&1
 grep -qx 'helper --disable-network' "$test_root/events"
-echo 'Installer stop failures, update, legacy uninstall, and repeated uninstall passed.'
+
+# Binary releases verify their contents before executing the helper or stopping services.
+rm "$test_root/repo with spaces/edimax_driver.c"
+(cd "$test_root/repo with spaces" && shasum -a 256 edimax_driver tools/service.sh services/*.plist > SHA256SUMS)
+bash "$service" install > "$test_root/output" 2>&1
+printf '\n# corrupt download\n' >> "$test_root/repo with spaces/edimax_driver"
+: > "$test_root/events"
+if bash "$service" install > "$test_root/output" 2>&1; then echo 'Corrupt binary accepted'; exit 1; fi
+[[ ! -s "$test_root/events" && -f "$test_root/running" ]]
+echo 'Installer preflight, stop failures, update, uninstall, and release checksums passed.'

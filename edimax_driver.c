@@ -25,6 +25,10 @@
 #include <IOKit/IOCFPlugIn.h>
 #include <IOKit/usb/IOUSBLib.h>
 
+#ifndef EDIMAX_VERSION
+#define EDIMAX_VERSION "development"
+#endif
+
 // ============================================================================
 // ASIX AX88179 Hardware Constants
 // ============================================================================
@@ -579,11 +583,15 @@ done:
 }
 
 int main(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "--version") == 0) {
+        printf("edimax_driver %s (experimental)\n", EDIMAX_VERSION);
+        return 0;
+    }
     int configure = 0;
     if (argc == 2 && strcmp(argv[1], "--configure-network") == 0) configure = 1;
     if (argc == 2 && strcmp(argv[1], "--disable-network") == 0) configure = -1;
     if (argc > 1 && !configure) {
-        fprintf(stderr, "Usage: %s [--configure-network | --disable-network]\n", argv[0]);
+        fprintf(stderr, "Usage: %s [--version | --configure-network | --disable-network]\n", argv[0]);
         return 1;
     }
     if (geteuid() != 0) { fprintf(stderr, "Run with sudo.\n"); return 1; }
