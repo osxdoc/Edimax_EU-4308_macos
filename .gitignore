@@ -2,6 +2,9 @@
 edimax_driver
 tools/dump_mii
 tests/test_driver
+tests/test_lifecycle
+tests/test_network
+tests/test_diagnostic
 /dist/
 *.o
 

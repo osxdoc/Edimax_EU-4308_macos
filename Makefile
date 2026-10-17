@@ -7,6 +7,7 @@ LDFLAGS = -framework IOKit -framework CoreFoundation -framework SystemConfigurat
 TARGET = edimax_driver
 TOOL_MII = tools/dump_mii
 PLIST = com.edimax.ax88179.driver.plist
+TESTS = tests/test_driver tests/test_lifecycle tests/test_network tests/test_diagnostic
 
 .PHONY: all clean run tools test package install uninstall
 
@@ -29,9 +30,11 @@ install: $(TARGET)
 uninstall: $(TARGET)
 	sudo /bin/bash tools/service.sh uninstall
 
-test:
-	$(CC) -O1 -g -Wall -Wextra -fsanitize=address,undefined tests/test_driver.c $(LDFLAGS) -o tests/test_driver
-	./tests/test_driver
+tests/%: tests/%.c edimax_driver.c tools/dump_mii.c
+	$(CC) -O1 -g -Wall -Wextra -fsanitize=address,undefined $< $(LDFLAGS) -o $@
+
+test: $(TESTS)
+	@for test in $(TESTS); do ./$$test || exit $$?; done
 	bash tests/test_service.sh
 	bash tests/test_package.sh
 	bash -n Install.command Uninstall.command tools/*.sh tests/*.sh
@@ -41,4 +44,4 @@ package: $(TARGET)
 	/bin/bash tools/package.sh
 
 clean:
-	rm -f $(TARGET) $(TOOL_MII) tests/test_driver
+	rm -f $(TARGET) $(TOOL_MII) $(TESTS)

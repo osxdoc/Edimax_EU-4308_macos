@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This repository implements an experimental macOS userspace driver for Edimax EU-4308 / ASIX AX88179 Ethernet adapters.
+Experimental macOS userspace driver for Edimax EU-4308 / ASIX AX88179 Ethernet adapters.
 
 - `edimax_driver.c`: USB access through IOKit, packet forwarding through BPF and paired `feth` interfaces, link management, and cleanup.
 - `tools/dump_mii.c`: standalone USB MII/PHY register diagnostic.
@@ -10,7 +10,7 @@ This repository implements an experimental macOS userspace driver for Edimax EU-
 - `Install.command` and `Uninstall.command`: Finder-friendly Bash installers.
 - `Makefile`: build and service lifecycle commands; `README.md`: user setup instructions.
 
-`tests/` checks packet handling, installers, and release packages. `tools/package.sh` creates ZIPs in ignored `dist/`; `VERSION` defines release versions.
+`tests/` checks packets, lifecycle recovery, network locations, diagnostics, installers, and packages. `tools/package.sh` creates ZIPs in ignored `dist/`; `VERSION` defines release versions.
 
 ## Build, Test, and Development Commands
 
@@ -34,4 +34,4 @@ Tests use C assertions with AddressSanitizer and UndefinedBehaviorSanitizer; no 
 
 ## Commit & Pull Request Guidelines
 
-History mixes imperative subjects with recent `fix:`, `feat:`, and `docs:` prefixes; prefer those prefixes and concise, specific subjects. Keep changes focused. PRs should describe the problem, resulting behavior, related issues, and validation performed. Include logs for driver changes and screenshots when Network settings behavior changes. Keep installer and Makefile behavior aligned through `tools/service.sh`, update README instructions when needed, and exclude generated binaries. Runtime and installation checks change system networking; use a machine where interruption is acceptable.
+History mixes imperative subjects with recent `fix:`, `feat:`, and `docs:` prefixes; prefer those prefixes and specific subjects. Keep changes focused. PRs should describe the problem, resulting behavior, related issues, and validation performed. Include logs for driver changes and screenshots when Network settings behavior changes. Keep installer and Makefile behavior aligned through `tools/service.sh`, update README instructions when needed, and exclude generated binaries. Runtime and installation checks change system networking; use a machine where interruption is acceptable.

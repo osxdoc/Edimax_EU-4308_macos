@@ -11,6 +11,8 @@
 #include <stddef.h>
 #include <spawn.h>
 #include <sys/file.h>
+#include <sys/stat.h>
+#include <sys/sysctl.h>
 #include <sys/wait.h>
 #include <libkern/OSByteOrder.h>
 #include <SystemConfiguration/SystemConfiguration.h>
@@ -41,7 +43,6 @@
     #define AX_RX_CTL_IPE       0x0200
     #define AX_RX_CTL_START     0x0080
     #define AX_RX_CTL_AP        0x0020
-    #define AX_RX_CTL_AM        0x0010
     #define AX_RX_CTL_AB        0x0008
     #define AX_RX_CTL_AMALL     0x0002
 
@@ -66,7 +67,6 @@
 
 #define AX_RXCOE_CTL            0x34
 #define AX_TXCOE_CTL            0x35
-    #define AX_COE_ALL          0x67
 
 #define AX_PAUSE_WATERLVL_HIGH  0x54
 #define AX_PAUSE_WATERLVL_LOW   0x55
@@ -77,7 +77,6 @@
 
 #define MII_BMSR                0x01
     #define BMSR_LSTATUS        0x0004
-    #define BMSR_ANEGCOMPLETE   0x0020
 
 #define MII_ADVERTISE           0x04
 #define MII_CTRL1000            0x09
@@ -132,6 +131,51 @@ static int run_ifconfig(const char *interface, const char *action, const char *v
         return -1;
     }
     return 0;
+}
+
+static const char *feth_names[] = { "feth0", "feth1" };
+
+static int save_interface_state(int fd, const struct timeval *boot, const unsigned owned[2]) {
+    char state[128];
+    int length = snprintf(state, sizeof(state), "%d EDIMAX1 %lld %d %u %u\n", getpid(),
+                          (long long)boot->tv_sec, boot->tv_usec, owned[0], owned[1]);
+    if (pwrite(fd, state, (size_t)length, 0) != length || ftruncate(fd, length) < 0) {
+        perror("[-] Save interface ownership");
+        return -1;
+    }
+    return 0;
+}
+
+static int remove_owned_interfaces(const unsigned owned[2]) {
+    for (unsigned i = 0; i < 2; i++) {
+        unsigned current = if_nametoindex(feth_names[i]);
+        if (owned[i] && current && current != owned[i]) {
+            fprintf(stderr, "[-] %s was replaced; refusing to remove another interface.\n", feth_names[i]);
+            return -1;
+        }
+    }
+    for (unsigned i = 0; i < 2; i++) {
+        if (owned[i] && if_nametoindex(feth_names[i]) && run_ifconfig(feth_names[i], "destroy", NULL) != 0) return -1;
+    }
+    return 0;
+}
+
+static int recover_stale_interfaces(int fd, const struct timeval *boot) {
+    unsigned current[] = { if_nametoindex("feth0"), if_nametoindex("feth1") };
+    if (!current[0] && !current[1]) return 0;
+    char state[128] = {0};
+    int pid, usec;
+    long long seconds;
+    unsigned owned[2];
+    ssize_t length = pread(fd, state, sizeof(state) - 1, 0);
+    if (length <= 0 || sscanf(state, "%d EDIMAX1 %lld %d %u %u", &pid, &seconds, &usec, &owned[0], &owned[1]) != 5 ||
+        pid <= 0 || seconds != boot->tv_sec || usec != boot->tv_usec ||
+        (current[0] && current[0] != owned[0]) || (current[1] && current[1] != owned[1])) {
+        fprintf(stderr, "[-] Unverified feth0/feth1 interfaces exist; inspect their owner before removing them.\n");
+        return -1;
+    }
+    printf("[*] Recovering interfaces left by the previous driver process.\n");
+    return remove_owned_interfaces(owned);
 }
 
 static int ax_read_cmd(uint8_t cmd, uint16_t value, uint16_t index, uint16_t len, void *data) {
@@ -502,8 +546,8 @@ static int initialize_device(uint8_t mac[6]) {
     return ax_write_word(AX_ACCESS_PHY, AX88179_PHY_ID, MII_BMCR, bmcr | BMCR_ANENABLE | BMCR_ANRESTART);
 }
 
-static SCNetworkServiceRef copy_feth_service(SCPreferencesRef prefs) {
-    CFArrayRef services = SCNetworkServiceCopyAll(prefs);
+static SCNetworkServiceRef copy_feth_service(SCPreferencesRef prefs, SCNetworkSetRef set) {
+    CFArrayRef services = set ? SCNetworkSetCopyServices(set) : SCNetworkServiceCopyAll(prefs);
     SCNetworkServiceRef found = NULL;
     if (services) {
         for (CFIndex i = 0; i < CFArrayGetCount(services); i++) {
@@ -522,8 +566,9 @@ static int configure_network_service(int mode) {
     SCPreferencesRef prefs = SCPreferencesCreate(NULL, CFSTR("Edimax AX88179"), NULL);
     if (!prefs) return -1;
     if (!SCPreferencesLock(prefs, true)) { CFRelease(prefs); return -1; }
-    SCNetworkServiceRef service = copy_feth_service(prefs);
     SCNetworkSetRef set = SCNetworkSetCopyCurrent(prefs);
+    SCNetworkServiceRef service = set ? copy_feth_service(prefs, set) : NULL;
+    if (!service && mode != 0) service = copy_feth_service(prefs, NULL);
     int result = -1;
     bool changed = false;
     if (!set) goto done;
@@ -587,11 +632,12 @@ int main(int argc, char **argv) {
         printf("edimax_driver %s (experimental)\n", EDIMAX_VERSION);
         return 0;
     }
+    bool cleanup_interfaces = argc == 2 && strcmp(argv[1], "--cleanup-interfaces") == 0;
     int configure = 0;
     if (argc == 2 && strcmp(argv[1], "--configure-network") == 0) configure = 1;
     if (argc == 2 && strcmp(argv[1], "--disable-network") == 0) configure = -1;
-    if (argc > 1 && !configure) {
-        fprintf(stderr, "Usage: %s [--version | --configure-network | --disable-network]\n", argv[0]);
+    if (argc > 1 && !configure && !cleanup_interfaces) {
+        fprintf(stderr, "Usage: %s [--version | --configure-network | --disable-network | --cleanup-interfaces]\n", argv[0]);
         return 1;
     }
     if (geteuid() != 0) { fprintf(stderr, "Run with sudo.\n"); return 1; }
@@ -602,7 +648,15 @@ int main(int argc, char **argv) {
         if (lock >= 0) close(lock);
         return 1;
     }
-    if (ftruncate(lock, 0) < 0 || dprintf(lock, "%d\n", getpid()) < 0) { close(lock); return 1; }
+    struct stat lock_info;
+    struct timeval boot;
+    size_t boot_size = sizeof(boot);
+    if (fstat(lock, &lock_info) < 0 || !S_ISREG(lock_info.st_mode) || lock_info.st_nlink != 1 || lock_info.st_uid != 0 ||
+        (lock_info.st_mode & 022) || sysctlbyname("kern.boottime", &boot, &boot_size, NULL, 0) < 0) {
+        fprintf(stderr, "[-] Cannot validate the driver lock or boot identity.\n");
+        close(lock);
+        return 1;
+    }
     struct sigaction action = { .sa_handler = sig_handler };
     sigemptyset(&action.sa_mask);
     if (sigaction(SIGINT, &action, NULL) < 0 || sigaction(SIGTERM, &action, NULL) < 0) {
@@ -611,17 +665,19 @@ int main(int argc, char **argv) {
         return 1;
     }
     setvbuf(stdout, NULL, _IOLBF, 0);
-    bool own_feth0 = false, own_feth1 = false;
+    unsigned owned[2] = {0};
     int result = 1;
-    if (if_nametoindex("feth0") || if_nametoindex("feth1")) {
-        fprintf(stderr, "[-] feth0/feth1 already exist; refusing to replace another interface.\n");
-        goto cleanup;
-    }
+    if (recover_stale_interfaces(lock, &boot) != 0) { close(lock); return 1; }
+    if (save_interface_state(lock, &boot, owned) != 0) goto cleanup;
+    if (cleanup_interfaces) { close(lock); return 0; }
     if (configure_network_service(0) != 0) goto cleanup;
+    // shortcut: a kill between create and ownership recording requires manual inspection; never guess ownership.
     if (run_ifconfig("feth0", "create", NULL) != 0) goto cleanup;
-    own_feth0 = true;
+    owned[0] = if_nametoindex("feth0");
+    if (save_interface_state(lock, &boot, owned) != 0) goto cleanup;
     if (run_ifconfig("feth1", "create", NULL) != 0) goto cleanup;
-    own_feth1 = true;
+    owned[1] = if_nametoindex("feth1");
+    if (save_interface_state(lock, &boot, owned) != 0) goto cleanup;
     if (run_ifconfig("feth0", "up", NULL) != 0 || run_ifconfig("feth1", "up", NULL) != 0) goto cleanup;
     g_bpf_fd = open_bpf_on_interface("feth1");
     if (g_bpf_fd < 0) { perror("[-] Open BPF"); goto cleanup; }
@@ -706,8 +762,11 @@ cleanup:
         (*g_dev)->Release(g_dev);
     }
     if (g_bpf_fd >= 0) close(g_bpf_fd);
-    if (own_feth0 && run_ifconfig("feth0", "destroy", NULL) != 0) result = 1;
-    if (own_feth1 && run_ifconfig("feth1", "destroy", NULL) != 0) result = 1;
+    if (remove_owned_interfaces(owned) != 0) result = 1;
+    else {
+        const unsigned empty[2] = {0};
+        if (save_interface_state(lock, &boot, empty) != 0) result = 1;
+    }
     close(lock);
     if (result == 0) printf("[*] Driver stopped; virtual interfaces removed.\n");
     return result;

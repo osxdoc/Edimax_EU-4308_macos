@@ -6,7 +6,7 @@
     <string>com.edimax.ax88179.driver</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/bin/edimax_driver</string>
+        <string>/Library/PrivilegedHelperTools/edimax_driver</string>
     </array>
     <key>RunAtLoad</key>
     <true/>

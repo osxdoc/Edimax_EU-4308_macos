@@ -4,7 +4,7 @@ Experimental userspace Ethernet driver for the Edimax EU-4308 v1.0 (`VID 0x0b95`
 
 ## Download and install without Xcode
 
-1. Download `Edimax-EU-4308-macOS-0.1.0.zip` from [GitHub Releases](https://github.com/osxdoc/Edimax_EU-4308_macos/releases). The automatically generated **Source code** downloads contain no compiled executable.
+1. Download `Edimax-EU-4308-macOS-0.1.1.zip` from [GitHub Releases](https://github.com/osxdoc/Edimax_EU-4308_macos/releases). The automatically generated **Source code** downloads contain no compiled executable.
 2. Extract the complete ZIP and keep its files together. It includes the universal `edimax_driver`, `Install.command`, `Uninstall.command`, the service definition, and the shared service helper.
 3. Double-click `Install.command` and authenticate as an administrator. The binary package installs without `make`, a compiler, or Xcode. Keep the extracted folder for updates and uninstallation.
 4. To remove the driver, double-click that folder's `Uninstall.command`; no build tools are needed. It retains the disabled network service's saved settings and existing logs.
@@ -12,7 +12,7 @@ Experimental userspace Ethernet driver for the Edimax EU-4308 v1.0 (`VID 0x0b95`
 Download the accompanying `.zip.sha256` file to verify the archive before extracting it:
 
 ```sh
-shasum -a 256 -c Edimax-EU-4308-macOS-0.1.0.zip.sha256
+shasum -a 256 -c Edimax-EU-4308-macOS-0.1.1.zip.sha256
 ```
 
 The package also contains `SHA256SUMS`, checked by the service helper before installation or removal, and `BUILD.txt` with the source commit and build target. Checksums detect corruption; they are not a developer identity signature.
@@ -27,7 +27,7 @@ AX88179 USB bulk endpoints <-> edimax_driver <-> BPF on feth1 <-> feth0 <-> macO
 
 `feth` is a Darwin testing interface, not Apple's supported USB Ethernet driver interface. This project remains an experimental workaround. Apple's supported userspace architecture is [USBDriverKit with NetworkingDriverKit](https://developer.apple.com/documentation/networkingdriverkit), packaged as a system extension with the required entitlements and signing. This repository does not implement or ship a DriverKit extension. Kernel extensions are deprecated; it is inaccurate to say they are universally blocked.
 
-The daemon discovers the bulk endpoints, configures the controller for the negotiated speed and duplex, and pairs the virtual interfaces only while the physical cable has carrier. On link loss it disconnects the pair so macOS can select another network service. A process lock prevents two instances from taking over the same interfaces. Existing `feth0` or `feth1` interfaces are never overwritten.
+The daemon discovers the bulk endpoints, configures the controller for the negotiated speed and duplex, and pairs the virtual interfaces only while the physical cable has carrier. On link loss it disconnects the pair so macOS can select another network service. A process lock prevents two instances from taking over the same interfaces. Recovery records interface indices and the current boot identity in the protected PID file. After a crash, startup removes only a matching pair left by this driver; foreign interfaces, old-boot records, and unverified interfaces are refused. A forced kill between interface creation and ownership recording still requires manual inspection.
 
 ## Build and test
 
@@ -39,9 +39,9 @@ make package         # Universal ZIP and SHA-256 checksum in dist/
 make clean           # Remove generated executables
 ```
 
-Tests cover carrier detection, 10/100/1000-Mbit modes, USB framing and padding, malformed BPF/USB records, and successful versus failed RX injection. They require no root access or USB device. Hardware checks must also cover DHCP/static IPv4, IPv6, LAN-bound traffic, cable removal, USB reconnection, sleep/wake, and Wi-Fi/VPN coexistence. Link speed is not a throughput measurement.
+Tests cover carrier detection, 10/100/1000-Mbit modes, USB framing and padding, malformed BPF/USB records, and successful versus failed RX injection. They require no root access or USB device. Additional sanitizer tests cover ownership recovery, foreign interfaces, active network locations, saved manual settings, service creation, configuration errors, and incomplete USB diagnostic transfers. Hardware checks must also cover DHCP/static IPv4, IPv6, LAN-bound traffic, cable removal, USB reconnection, sleep/wake, and Wi-Fi/VPN coexistence. Link speed is not a throughput measurement.
 
-Installer tests run against temporary files and mocked system commands. They check stop failures, updates, uninstalling legacy versions, repeated uninstallation, executable preflight, and corrupt packages without changing the Mac's network. Package tests extract the ZIP, verify signatures and checksums, and exercise both entry points with a failing compiler stub and mocked administrator operations.
+Installer tests run against temporary files and mocked system commands. They check protected directory ownership/modes/symlinks, real OS locking, updates, legacy migration, repeated uninstallation, executable preflight, corrupt packages, and rollback after setup, unload, registration, and process-start failures without changing the Mac's network. Package tests extract the ZIP, verify signatures and checksums, and exercise both entry points with a failing compiler stub and mocked administrator operations.
 
 `VERSION` defines the release version. `make package` checks both architectures and the macOS 14 deployment target, adds an ad-hoc signature to the packaged copy, and includes the source revision in `BUILD.txt`. ZIP files stay in ignored `dist/` and are distributed as release assets, rather than committed binaries. For publication, package a clean, committed source tree and attach both the ZIP and `.zip.sha256` file to the matching GitHub release.
 
@@ -55,6 +55,8 @@ The complete uninstall/reinstall cycle was also tested on this Mac: installed fi
 
 The v0.1.0 binary ZIP was separately extracted to a path containing spaces and used for installation, uninstallation, and reinstallation without source files or a Makefile. The packaged executable then passed LAN-bound IPv4 and IPv6 HTTPS checks. Download quarantine and first-run Gatekeeper approval on another Mac remain untested.
 
+The v0.1.1 binary ZIP passed the same install/uninstall/reinstall cycle from a path containing spaces. The executable is root-owned, mode 755, under the protected helper directory; the legacy executable was removed. A deliberate `SIGKILL` triggered launchd recovery with a new, verified interface pair. LAN-bound IPv4/IPv6 HTTPS passed before and after recovery and reinstallation, and the saved static configuration was unchanged. The checked MII diagnostic also completed successfully with the daemon stopped. One malformed RX transfer after the forced kill triggered an automatic USB-session restart; connectivity recovered. Carrier becomes active before macOS finishes configuring addresses and routes, so connectivity checks allow that configuration to settle.
+
 ## Network configuration
 
 Run the one-time setup before starting the daemon:
@@ -66,17 +68,17 @@ sudo ./edimax_driver
 
 Stop with Ctrl+C. Do not run an interactive instance alongside the installed service.
 
-Setup finds the network service by its `feth0` interface, preserving existing manual IP, DNS, and service-order settings. If no service exists, it creates one with default protocols through the public SystemConfiguration preferences schema; `feth` is not enumerated as IOKit hardware. The daemon itself does not change saved network settings. A disabled service must be enabled explicitly in System Settings or by the setup command.
+Setup first finds the `feth0` service in the active network location, preserving its manual IP, DNS, and service-order settings. Installation can reuse a saved service from another location only when the active location has none. If no service exists, it creates one with default protocols through the public SystemConfiguration preferences schema; `feth` is not enumerated as IOKit hardware. The daemon itself does not change saved network settings. A disabled service must be enabled explicitly in System Settings or by the setup command.
 
 Configure **AX88179** in System Settings → Network. Use DHCP unless your network requires an assigned static address. Do not copy an IP address from somebody else's setup or use manual configuration merely to force a green indicator. macOS manages DHCP, IPv6, routes, DNS, and service priority through [SystemConfiguration](https://developer.apple.com/library/archive/documentation/Networking/Conceptual/SystemConfigFrameworks/SC_Components/SC_Components.html). The daemon does not publish fabricated status or periodically replace the default route. To prefer Wi-Fi during testing, place it before AX88179 in the service order.
 
 ## Install and uninstall
 
-The binary ZIP's scripts use the included executable. In a source checkout, double-click `Install.command`, or run `make install`: both build before requesting administrator access and use the same service-management script. The Finder script forces a rebuild when `edimax_driver.c` exists; Make uses normal source timestamps. Installation validates the plist, checks that the current helper can run, stages the executable, stops the previous daemon, atomically replaces `/usr/local/bin/edimax_driver`, configures the network service, and registers `services/com.edimax.ax88179.driver.plist` with launchd. Installation enables autostart, including after a previous recovery disabled the job.
+The binary ZIP's scripts use the included executable. In a source checkout, double-click `Install.command`, or run `make install`: both build before requesting administrator access and use the same service-management script. The Finder script forces a rebuild when `edimax_driver.c` exists; Make uses normal source timestamps. Installation validates the plist, checks that the current helper can run, stages the executable, stops the previous daemon, atomically replaces `/Library/PrivilegedHelperTools/edimax_driver`, configures the network service, and registers `services/com.edimax.ax88179.driver.plist` with launchd. Installation enables autostart, including after a previous recovery disabled the job. It validates protected directory ownership and permissions, serializes install/uninstall operations with macOS `lockf`, and migrates legacy installations out of the user-writable `/usr/local/bin` directory.
 
 Double-click `Uninstall.command`, or run `make uninstall` in a source checkout. Source uninstallation builds the current helper and requires Xcode Command Line Tools; the binary ZIP's uninstaller requires neither. Both stop the daemon, use the current helper to disable the saved `feth0` service, and remove the installed executable and launchd plist. Network settings and existing logs are retained. The installed legacy executable is never invoked with new options; an already missing installed binary does not prevent cleanup.
 
-Both operations request `SIGTERM` and wait up to 15 seconds before unloading the launchd job. If a driver process remains, they abort without replacing or deleting installed files. They do not issue `SIGKILL`. Later setup or registration failures can leave a partial installation; there is no automatic rollback. Fix the reported error and rerun installation. Successful registration alone does not prove adapter connectivity; check the status, log, and LAN-bound traffic below.
+Both operations request `SIGTERM` and wait up to 15 seconds before unloading the launchd job. If a driver process remains, they abort without replacing or deleting installed files. They do not issue `SIGKILL`. Before stopping, the installer stages new files and backs up the previous executable and service definition in a private directory. Later failures restore the previous files and loaded job; legacy rollback also uses the protected executable location. If recovery itself fails, backups remain at the path printed in the error. Do not delete them before recovery. This restores driver files and job state, rather than replacing system-wide network preferences. Installation also checks that the process stays running. A running process alone does not prove adapter connectivity; check the status, log, and LAN-bound traffic below.
 
 ```sh
 sudo launchctl print system/com.edimax.ax88179.driver
@@ -90,7 +92,7 @@ A carrier indication does not prove LAN or Internet connectivity. Compare traffi
 
 Stop the daemon before using `sudo ./tools/dump_mii`: the tool opens the USB device and changes PHY power/clock registers. It must not compete with the running driver.
 
-For recovery from the old driver, stop/unload its launchd service first and disable its AX88179 network service. The old release overwrote global network state and started temporary `ipconfig` services; do not run it alongside this version. Preserve your existing Wi-Fi/VPN configuration. Do not delete all SystemConfiguration preferences or disable SIP. A stale virtual interface after a crash should be inspected before removal, since another application may own it.
+For recovery from the old driver, stop/unload its launchd service first and disable its AX88179 network service. The old release overwrote global network state and started temporary `ipconfig` services; do not run it alongside this version. Preserve your existing Wi-Fi/VPN configuration. Do not delete all SystemConfiguration preferences or disable SIP. The current driver automatically recovers a verified stale pair. For unverified interfaces, inspect ownership before removal; another application may own them. Installer cleanup uses the same ownership checks. The diagnostic tool exits with an error for failed or incomplete USB requests instead of printing zero register values as valid readings.
 
 ## License
 

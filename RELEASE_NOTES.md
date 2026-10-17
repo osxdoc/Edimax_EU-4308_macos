@@ -1,16 +1,15 @@
-# v0.1.0 — Experimental binary package
+# v0.1.1 — Installer security and recovery fixes
 
-Download **Edimax-EU-4308-macOS-0.1.0.zip** and extract the complete folder. Run `Install.command` to install or `Uninstall.command` to remove the driver. Keep the folder for uninstallation. Neither script needs Xcode or a compiler in this binary package.
+Download **Edimax-EU-4308-macOS-0.1.1.zip**, extract the complete folder, and run `Install.command`. Keep the folder for `Uninstall.command`. Neither operation requires Xcode or a compiler. This version supersedes v0.1.0; existing users should install this update.
 
-- Universal executable for Apple Silicon and Intel, targeting macOS 14 or later.
-- Includes both scripts, shared service helper, launchd definition, license, build information, and SHA-256 checksums.
-- macOS manages DHCP, IPv6, routing, DNS, and network service priority.
-- Fixes USB framing, full-packet transfer termination, negotiated link settings, and installer cleanup.
+- Moves the root daemon from the user-writable `/usr/local/bin` directory into `/Library/PrivilegedHelperTools`, validates directory permissions, and migrates old installations.
+- Serializes install/uninstall operations with macOS file locking. Failed updates restore the previous executable, service definition, and loaded job; failed recovery retains private backups.
+- Recovers interfaces after a driver crash only when recorded interface indices and boot identity match. Foreign or unverified interfaces remain untouched.
+- Selects the network service in the active network location, preserving its manual IP, DNS, and service order.
+- Makes USB diagnostics reject failed and incomplete transfers, and removes unused hardware definitions.
 
-The accompanying `.zip.sha256` file verifies the download with `shasum -a 256 -c Edimax-EU-4308-macOS-0.1.0.zip.sha256`.
+Includes a universal arm64/x86_64 executable targeting macOS 14+, both Finder scripts, service helper/definition, license, source revision, and SHA-256 checksums. Verify the download with `shasum -a 256 -c Edimax-EU-4308-macOS-0.1.1.zip.sha256`.
 
-Runtime and hardware validation covers macOS 27.2 / Apple Silicon with an EU-4308: IPv4/IPv6 HTTPS, DHCP, static addressing, packet boundaries, service lifecycle, and Wi-Fi connectivity after stopping. Build, sanitizer, installer, and package tests pass. Intel, older macOS versions, physical reconnection, sleep/wake, VPN traffic, sustained throughput, and network service creation on a clean Mac remain untested.
+Automated sanitizer, installer, package, locking, rollback, location, recovery, and diagnostic tests pass. On macOS 27.2 / Apple Silicon, the binary ZIP passed protected installation, forced-kill recovery, uninstall/reinstall, preserved static settings, checked PHY diagnostics, and LAN-bound IPv4/IPv6 HTTPS. One post-crash RX error recovered through an automatic USB-session restart; details are in the README. Intel, older macOS versions, first-download Gatekeeper approval, physical reconnection, sleep/wake, VPNs, and sustained throughput remain untested. A forced kill between interface creation and ownership recording requires manual inspection.
 
-Installation, uninstallation, and reinstallation from the binary ZIP were tested separately, with IPv4/IPv6 HTTPS afterward. First-run Gatekeeper approval on another Mac remains untested.
-
-**Signing:** ad-hoc signed, without Developer ID or Apple notarization. Gatekeeper may require explicit user approval; see [Apple's instructions](https://support.apple.com/en-us/102445). The BPF/feth architecture remains experimental; this release contains no DriverKit extension.
+**Signing:** ad-hoc signed, without Developer ID or Apple notarization; [Gatekeeper may require explicit approval](https://support.apple.com/en-us/102445). The BPF/feth architecture remains experimental; this package contains no DriverKit extension.

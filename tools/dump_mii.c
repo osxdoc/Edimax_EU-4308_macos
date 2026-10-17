@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <libkern/OSByteOrder.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
 #include <IOKit/IOCFPlugIn.h>
@@ -12,15 +13,10 @@
 #define AX88179_PHY_ID          0x03
 
 #define AX_PHYPWR_RSTCTL_IPRL 0x0020
-#define AX_GPIO_CTRL            0x25
-    #define AX_GPIO_CTRL_GPIO3EN 0x80
-    #define AX_GPIO_CTRL_GPIO2EN 0x40
-    #define AX_GPIO_CTRL_GPIO1EN 0x20
 
 #define GENERAL_STATUS          0x03
-    #define AX_SECLD            0x04
 
-static int ax_read_cmd(IOUSBDeviceInterface **dev, uint8_t cmd, uint16_t value, uint16_t index, uint16_t len, void *data) {
+static int ax_read_cmd(IOUSBDeviceInterface182 **dev, uint8_t cmd, uint16_t value, uint16_t index, uint16_t len, void *data) {
     IOUSBDevRequest req;
     memset(&req, 0, sizeof(req));
     req.bmRequestType = 0xC0;
@@ -30,10 +26,14 @@ static int ax_read_cmd(IOUSBDeviceInterface **dev, uint8_t cmd, uint16_t value, 
     req.wLength = len;
     req.pData = data;
     kern_return_t kr = (*dev)->DeviceRequest(dev, &req);
-    return (kr == KERN_SUCCESS) ? 0 : -1;
+    if (kr != KERN_SUCCESS || req.wLenDone != len) {
+        fprintf(stderr, "USB request reg=0x%04x failed: 0x%08x (%u/%u bytes)\n", value, kr, req.wLenDone, len);
+        return -1;
+    }
+    return 0;
 }
 
-static int ax_write_cmd(IOUSBDeviceInterface **dev, uint8_t cmd, uint16_t value, uint16_t index, uint16_t len, const void *data) {
+static int ax_write_cmd(IOUSBDeviceInterface182 **dev, uint8_t cmd, uint16_t value, uint16_t index, uint16_t len, const void *data) {
     IOUSBDevRequest req;
     memset(&req, 0, sizeof(req));
     req.bmRequestType = 0x40;
@@ -43,21 +43,22 @@ static int ax_write_cmd(IOUSBDeviceInterface **dev, uint8_t cmd, uint16_t value,
     req.wLength = len;
     req.pData = (void *)data;
     kern_return_t kr = (*dev)->DeviceRequest(dev, &req);
-    return (kr == KERN_SUCCESS) ? 0 : -1;
+    if (kr != KERN_SUCCESS || req.wLenDone != len) {
+        fprintf(stderr, "USB request reg=0x%04x failed: 0x%08x (%u/%u bytes)\n", value, kr, req.wLenDone, len);
+        return -1;
+    }
+    return 0;
 }
 
-static uint16_t ax_mdio_read(IOUSBDeviceInterface **dev, uint16_t reg) {
-    uint16_t val = 0;
-    ax_read_cmd(dev, AX_ACCESS_PHY, AX88179_PHY_ID, reg, 2, &val);
-    return val;
-}
-
-__attribute__((unused))
-static void ax_mdio_write(IOUSBDeviceInterface **dev, uint16_t reg, uint16_t val) {
-    ax_write_cmd(dev, AX_ACCESS_PHY, AX88179_PHY_ID, reg, 2, &val);
+static int ax_mdio_read(IOUSBDeviceInterface182 **dev, uint16_t reg, uint16_t *value) {
+    uint16_t raw;
+    if (ax_read_cmd(dev, AX_ACCESS_PHY, AX88179_PHY_ID, reg, 2, &raw) != 0) return -1;
+    *value = OSSwapLittleToHostInt16(raw);
+    return 0;
 }
 
 int main(void) {
+    if (geteuid() != 0) { fprintf(stderr, "Run with sudo.\n"); return 1; }
     CFMutableDictionaryRef matchingDict = IOServiceMatching(kIOUSBDeviceClassName);
     if (!matchingDict) return 1;
 
@@ -65,6 +66,12 @@ int main(void) {
     SInt32 idProduct = 0x1790;
     CFNumberRef valVendor = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &idVendor);
     CFNumberRef valProduct = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &idProduct);
+    if (!valVendor || !valProduct) {
+        if (valVendor) CFRelease(valVendor);
+        if (valProduct) CFRelease(valProduct);
+        CFRelease(matchingDict);
+        return 1;
+    }
     CFDictionarySetValue(matchingDict, CFSTR(kUSBVendorID), valVendor);
     CFDictionarySetValue(matchingDict, CFSTR(kUSBProductID), valProduct);
     CFRelease(valVendor);
@@ -75,7 +82,7 @@ int main(void) {
     if (kr != KERN_SUCCESS) return 1;
 
     io_service_t usbDeviceRef = IOIteratorNext(iterator);
-    if (!usbDeviceRef) return 1;
+    if (!usbDeviceRef) { IOObjectRelease(iterator); return 1; }
 
     IOCFPlugInInterface **plugInInterface = NULL;
     SInt32 score;
@@ -84,33 +91,37 @@ int main(void) {
     IOObjectRelease(iterator);
     if (!plugInInterface) return 1;
 
-    IOUSBDeviceInterface **dev = NULL;
-    (*plugInInterface)->QueryInterface(plugInInterface, CFUUIDGetUUIDBytes(kIOUSBDeviceInterfaceID), (LPVOID *)&dev);
+    IOUSBDeviceInterface182 **dev = NULL;
+    (*plugInInterface)->QueryInterface(plugInInterface, CFUUIDGetUUIDBytes(kIOUSBDeviceInterfaceID182), (LPVOID *)&dev);
     (*plugInInterface)->Release(plugInInterface);
     if (!dev) return 1;
 
-    if ((*dev)->USBDeviceOpen(dev) != KERN_SUCCESS) return 1;
+    if ((*dev)->USBDeviceOpen(dev) != KERN_SUCCESS) { (*dev)->Release(dev); return 1; }
+    int result = 1;
 
     // Power up PHY
-    uint16_t pwr = AX_PHYPWR_RSTCTL_IPRL;
-    ax_write_cmd(dev, AX_ACCESS_MAC, 0x26, 2, 2, &pwr);
+    uint16_t pwr = OSSwapHostToLittleInt16(AX_PHYPWR_RSTCTL_IPRL);
+    if (ax_write_cmd(dev, AX_ACCESS_MAC, 0x26, 2, 2, &pwr) != 0) goto done;
     usleep(100000);
     uint8_t clk = 0x03;
-    ax_write_cmd(dev, AX_ACCESS_MAC, 0x33, 1, 1, &clk);
+    if (ax_write_cmd(dev, AX_ACCESS_MAC, 0x33, 1, 1, &clk) != 0) goto done;
     usleep(50000);
 
     uint8_t gen_status = 0;
-    ax_read_cmd(dev, AX_ACCESS_MAC, GENERAL_STATUS, 1, 1, &gen_status);
+    if (ax_read_cmd(dev, AX_ACCESS_MAC, GENERAL_STATUS, 1, 1, &gen_status) != 0) goto done;
     printf("GENERAL_STATUS = 0x%02X\n", gen_status);
 
     // Read MII registers
     printf("\n=== MII PHY Registers (PHY ID %d) ===\n", AX88179_PHY_ID);
     for (int r = 0; r <= 18; r++) {
-        uint16_t v = ax_mdio_read(dev, r);
+        uint16_t v;
+        if (ax_mdio_read(dev, r, &v) != 0) goto done;
         printf("Reg 0x%02X (%2d): 0x%04X\n", r, r, v);
     }
 
+    result = 0;
+done:
     (*dev)->USBDeviceClose(dev);
     (*dev)->Release(dev);
-    return 0;
+    return result;
 }
