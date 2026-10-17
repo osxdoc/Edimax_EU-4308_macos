@@ -10,6 +10,8 @@
     </array>
     <key>RunAtLoad</key>
     <true/>
+    <key>ExitTimeOut</key>
+    <integer>15</integer>
     <key>KeepAlive</key>
     <dict>
         <key>SuccessfulExit</key>

@@ -1,6 +1,7 @@
 # Compiled binaries
 edimax_driver
 tools/dump_mii
+tests/test_driver
 *.o
 
 # macOS metadata

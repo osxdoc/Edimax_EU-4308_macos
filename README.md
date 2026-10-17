@@ -1,133 +1,74 @@
-# Edimax EU-4308 (ASIX AX88179) Native macOS Userspace Driver
+# Edimax EU-4308 (ASIX AX88179) macOS Userspace Driver
 
-A zero-dependency, open-source userspace network driver for the **Edimax EU-4308 (v1.0)** USB-C Multiport Adapter (and other ASIX AX88179 Gigabit Ethernet devices) on modern macOS (macOS 14 Sonoma, macOS 15 Sequoia, macOS 26/27+ on Apple Silicon & Intel).
+Experimental userspace Ethernet driver for the Edimax EU-4308 v1.0 (`VID 0x0b95`, `PID 0x1790`). It uses native macOS frameworks and requires Xcode Command Line Tools, administrator access, and the actual adapter for hardware validation. No third-party libraries are required.
 
----
-
-## The Problem
-
-The **Edimax EU-4308 (v1.0)** USB-C adapter combines:
-* A **Realtek USB 3.0 Hub** (3x external USB-A ports)
-* An **ASIX AX88179** USB 3.0 to Gigabit Ethernet controller (`VID: 0x0B95`, `PID: 0x1790`)
-
-On modern macOS releases:
-1. **No Apple Inbox Driver:** Unlike standard USB CDC-NCM adapters, the AX88179 uses a proprietary vendor class (`bDeviceClass = 255`). Apple provides no built-in driver for it.
-2. **KEXT Deprecation:** Legacy Kernel Extensions (`.kext`) are completely blocked.
-3. **Broken Official Driver:** ASIX's official DriverKit extension (`.dext`) is notoriously unstable, fails Gatekeeper checks, and requires container apps that easily get orphaned or fail to bind behind USB hubs.
-4. **Developer Entitlement Lock:** Writing a custom DriverKit `.dext` requires restricted Apple Developer entitlements (`com.apple.developer.driverkit.family.networking`) that Apple rarely grants to individual developers.
-
----
-
-## The Solution: Native Userspace Architecture
-
-This driver runs **100% in user space** using Apple's native APIs. No kernel extensions, no disabled SIP, and no paid developer accounts required.
+## Architecture and limitations
 
 ```
-[Switch / Router Ethernet Cable]
-               │
-               ▼
-      [ASIX AX88179 Chip]
-               │  (USB Bulk IN/OUT via native IOKit)
-               ▼
-      [edimax_driver daemon]
-               │  (Raw Layer 2 Ethernet Frames via BPF)
-               ▼
-   [feth1] <=======> [feth0] (macOS Virtual Ethernet Pair)
-                        │
-                        ▼
-               macOS Network Stack (DHCP / TCP / IP)
+AX88179 USB bulk endpoints <-> edimax_driver <-> BPF on feth1 <-> feth0 <-> macOS
 ```
 
-### Key Highlights
-* **Zero External Dependencies:** Built entirely with macOS native frameworks (`IOKit`, `CoreFoundation`, Darwin `feth` and `bpf`).
-* **SIP Compatible:** Fully functional with 100% active System Integrity Protection (SIP).
-* **Gigabit Performance:** Auto-negotiates 1000 Mbit/s Full-Duplex or 100 Mbit/s with your switch.
-* **Auto DHCP:** Automatically provisions `feth0` with the adapter's genuine factory MAC address (`08:BE:AC:...`) and pulls an IP address via DHCP.
-* **Clean Cleanup:** Automatically tears down virtual interfaces and releases USB hardware upon termination (`Ctrl+C` or `SIGTERM`).
+`feth` is a Darwin testing interface, not Apple's supported USB Ethernet driver interface. This project remains an experimental workaround. Apple's supported userspace architecture is [USBDriverKit with NetworkingDriverKit](https://developer.apple.com/documentation/networkingdriverkit), packaged as a system extension with the required entitlements and signing. This repository does not implement or ship a DriverKit extension. Kernel extensions are deprecated; it is inaccurate to say they are universally blocked.
 
----
+The daemon discovers the bulk endpoints, configures the controller for the negotiated speed and duplex, and pairs the virtual interfaces only while the physical cable has carrier. On link loss it disconnects the pair so macOS can select another network service. A process lock prevents two instances from taking over the same interfaces. Existing `feth0` or `feth1` interfaces are never overwritten.
 
-## Quick Start
+## Build and test
 
-### 1. Build
-Requirements: macOS Command Line Tools / Xcode (`clang`, `make`).
-```bash
-make
+```sh
+make                 # Universal arm64/x86_64 driver
+make tools           # Standalone MII/PHY diagnostic
+make test            # Sanitizer-backed C tests and isolated installer tests
+make clean           # Remove generated executables
 ```
 
-### 2. Run Directly (Interactive)
-```bash
+Tests cover carrier detection, 10/100/1000-Mbit modes, USB framing and padding, malformed BPF/USB records, and successful versus failed RX injection. They require no root access or USB device. Hardware checks must also cover DHCP/static IPv4, IPv6, LAN-bound traffic, cable removal, USB reconnection, sleep/wake, and Wi-Fi/VPN coexistence. Link speed is not a throughput measurement.
+
+Installer tests run against temporary files and mocked system commands. They check stop failures, updates, uninstalling legacy versions, and repeated uninstallation without changing the Mac's network.
+
+### Hardware validation (2026-10-17)
+
+Tested on macOS 27.2 / Apple Silicon with the EU-4308 negotiating 1000 Mbit/s full duplex. All 20 LAN-bound pings across payload sizes 56, 462, 974, and 1472 bytes succeeded; the 974-byte case exercises the USB 1024-byte transfer boundary. IPv4 and IPv6 HTTPS returned 200. Native DHCP reached `BOUND` with a router ACK; the previous static configuration was restored and retested. launchd stop/restart, interface cleanup, duplicate-instance rejection, and Wi-Fi connectivity after stopping passed. The final installed driver reported zero RX/TX errors during validation. Build, sanitizer tests, and Clang static analysis passed.
+
+Physical unplug/replug, sleep/wake, 10/100-Mbit hardware, Intel runtime, VPN traffic, sustained throughput, and service creation on a clean Mac remain untested. The earlier boundary test exposed a TX timeout; the fix sends a terminating short USB packet in addition to setting the controller's padding flag.
+
+The complete uninstall/reinstall cycle was also tested on this Mac: installed files and virtual interfaces were removed, Wi-Fi became the default route, and reinstallation restored the existing static LAN address, autostart, and HTTPS connectivity. Isolated installer tests cover failure cases separately.
+
+## Network configuration
+
+Run the one-time setup before starting the daemon:
+
+```sh
+sudo ./edimax_driver --configure-network
 sudo ./edimax_driver
-# or: make run
 ```
 
-You will see live link negotiation and real-time traffic statistics:
-```text
-====================================================================
-   Edimax EU-4308 (ASIX AX88179) Native macOS Userspace Driver       
-====================================================================
+Stop with Ctrl+C. Do not run an interactive instance alongside the installed service.
 
-[+] Hardware MAC: 08:be:ac:21:b8:aa
-[*] Initializing AX88179 controller & Gigabit PHY...
-[+] USB Interface claimed successfully.
-[*] Setting up virtual Ethernet interface (feth0)...
-[+] Network bridge established: macOS [feth0] <---> [feth1] <---> Edimax AX88179
+Setup finds the network service by its `feth0` interface, preserving existing manual IP, DNS, and service-order settings. If no service exists, it creates one with default protocols through the public SystemConfiguration preferences schema; `feth` is not enumerated as IOKit hardware. The daemon itself does not change saved network settings. A disabled service must be enabled explicitly in System Settings or by the setup command.
 
-[LINK STATUS] ACTIVE -> 1000 Mbps Full-Duplex
-[STATS] RX: 124 pkts (18 KB) | TX: 98 pkts (12 KB) | Link: 1000M
-```
+Configure **AX88179** in System Settings → Network. Use DHCP unless your network requires an assigned static address. Do not copy an IP address from somebody else's setup or use manual configuration merely to force a green indicator. macOS manages DHCP, IPv6, routes, DNS, and service priority through [SystemConfiguration](https://developer.apple.com/library/archive/documentation/Networking/Conceptual/SystemConfigFrameworks/SC_Components/SC_Components.html). The daemon does not publish fabricated status or periodically replace the default route. To prefer Wi-Fi during testing, place it before AX88179 in the service order.
 
-Press `Ctrl+C` to stop the driver.
+## Install and uninstall
 
----
+Double-click `Install.command`, or run `make install`. Both build the driver before requesting administrator access and use the same service-management script. The Finder scripts force a rebuild; Make uses normal source timestamps. Installation validates the plist and stages the executable, stops the previous daemon, atomically replaces `/usr/local/bin/edimax_driver`, configures the network service, and registers `services/com.edimax.ax88179.driver.plist` with launchd. Installation enables autostart, including after a previous recovery disabled the job.
 
-## Easy One-Click Installation (For End Users)
+Double-click `Uninstall.command`, or run `make uninstall`. This also builds the current driver helper, so Xcode Command Line Tools are required for uninstallation. It stops the daemon, uses the current helper to disable the saved `feth0` service, and removes the installed executable and launchd plist. Network settings and existing logs are retained. The installed legacy executable is never invoked with new options; an already missing installed binary does not prevent cleanup.
 
-You don't need to use the terminal. In the Finder:
-1. Double-click **`Install.command`**
-2. Enter your macOS administrator password (or Touch ID) when prompted.
-3. Done! The driver runs as an automatic background service on every boot. **No reboot required.**
+Both operations request `SIGTERM` and wait up to 15 seconds before unloading the launchd job. If a driver process remains, they abort without replacing or deleting installed files. They do not issue `SIGKILL`. Later setup or registration failures can leave a partial installation; there is no automatic rollback. Fix the reported error and rerun installation. Successful registration alone does not prove adapter connectivity; check the status, log, and LAN-bound traffic below.
 
-To uninstall:
-* Double-click **`Uninstall.command`** (or run `make uninstall`).
-
----
-
-## Permanent Installation (CLI / Terminal)
-
-```bash
-make install
-```
-
-This installs the binary to `/usr/local/bin/edimax_driver` and registers a `launchd` daemon in `/Library/LaunchDaemons/com.edimax.ax88179.driver.plist`.
-
-### Check Service Status & Logs
-```bash
+```sh
+sudo launchctl print system/com.edimax.ax88179.driver
 tail -f /var/log/edimax_driver.log
 ```
 
-### macOS System Settings Integration
-Under **System Settings → Network**, the adapter appears as **AX88179**. 
-* Set IPv4 to **Manually** (e.g. IP `10.10.10.158`, Subnet `255.255.255.0`, Router `10.10.10.1`, DNS `10.10.10.1` or `10.10.10.32`) to have macOS show a permanent **green status indicator** and automatically route internet traffic through the adapter when Wi-Fi is disabled.
+## Diagnostics and recovery
 
-### Uninstall
-```bash
-make uninstall
-```
+A carrier indication does not prove LAN or Internet connectivity. Compare traffic explicitly bound to LAN and Wi-Fi, for example `ping -b feth0 -c 3 <your-router>` and `ping -b en0 -c 3 <your-router>`; verify the Wi-Fi interface name on your Mac. Inspect `ifconfig feth0`, `scutil --nwi`, and `route -n get default`.
 
----
+Stop the daemon before using `sudo ./tools/dump_mii`: the tool opens the USB device and changes PHY power/clock registers. It must not compete with the running driver.
 
-## Diagnostic Tools
-
-A standalone tool to inspect the hardware MII/PHY transceiver registers directly over USB is included in `tools/`:
-
-```bash
-make tools
-./tools/dump_mii
-```
-
----
+For recovery from the old driver, stop/unload its launchd service first and disable its AX88179 network service. The old release overwrote global network state and started temporary `ipconfig` services; do not run it alongside this version. Preserve your existing Wi-Fi/VPN configuration. Do not delete all SystemConfiguration preferences or disable SIP. A stale virtual interface after a crash should be inspected before removal, since another application may own it.
 
 ## License
 
-MIT License. See [LICENSE](LICENSE) for details.
+MIT; see [LICENSE](LICENSE).
