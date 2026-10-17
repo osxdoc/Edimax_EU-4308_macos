@@ -33,10 +33,17 @@ See [release notes](https://github.com/osxdoc/Edimax_EU-4308_macos/releases/tag/
 
 ## Build from source
 
-Requires macOS and Xcode Command Line Tools.
+Requires macOS and Xcode Command Line Tools. If needed, run `xcode-select --install` and complete the installation first.
 
 ```sh
-make                 # Universal driver
+git clone https://github.com/osxdoc/Edimax_EU-4308_macos.git
+cd Edimax_EU-4308_macos
+make                 # Creates ./edimax_driver for arm64 and x86_64
+```
+
+From the same directory:
+
+```sh
 make test            # Regression and installer tests
 make install         # Build and install; requests administrator access
 make uninstall       # Build the cleanup helper and remove the driver
