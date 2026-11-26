@@ -1,15 +1,15 @@
-# v0.1.1 — Installer security and recovery fixes
+# v0.1.2 — USB stability, event-driven hotplug, and installer staging
 
-Download **Edimax-EU-4308-macOS-0.1.1.zip**, extract the complete folder, and run `Install.command`. Keep the folder for `Uninstall.command`. Neither operation requires Xcode or a compiler. This version supersedes v0.1.0; existing users should install this update.
+Download **Edimax-EU-4308-macOS-0.1.2.zip**, extract the complete folder, and run `Install.command`. Keep the folder for `Uninstall.command`. Neither operation requires Xcode or a compiler. This version supersedes v0.1.1; existing users should install this update.
 
-- Moves the root daemon from the user-writable `/usr/local/bin` directory into `/Library/PrivilegedHelperTools`, validates directory permissions, and migrates old installations.
-- Serializes install/uninstall operations with macOS file locking. Failed updates restore the previous executable, service definition, and loaded job; failed recovery retains private backups.
-- Recovers interfaces after a driver crash only when recorded interface indices and boot identity match. Foreign or unverified interfaces remain untouched.
-- Selects the network service in the active network location, preserving its manual IP, DNS, and service order.
-- Makes USB diagnostics reject failed and incomplete transfers, and removes unused hardware definitions.
+- Accepts USB Bulk-IN zero-length packets without resetting the active Ethernet session, increases BPF TX buffer headroom to 256 KB, and marks the LaunchDaemon `Interactive` to avoid background I/O throttling.
+- Stops MAC RX before PHY reset, clears USB bulk endpoint stalls and data toggles on interface claim, and resets MAC RX/medium registers on clean shutdown.
+- Detects sub-second link drops and sleep/wake subnet changes via the latched `MII_BMSR` link bit, and restricts IEEE 802.3x PAUSE flow control to full-duplex links.
+- Replaces 1 Hz idle polling when unplugged with IOKit hotplug notifications, handles `SIGHUP`/`SIGPIPE` cleanly, and logs `[STATS]` only when counters change.
+- Retries `SCPreferencesLock` on `kSCStatusStale`, avoids `launchd` crash loops when the `AX88179` service is disabled or outside the active location, and stages installer inputs into root-owned storage before checksum verification and execution.
 
-Includes a universal arm64/x86_64 executable targeting macOS 14+, both Finder scripts, service helper/definition, license, source revision, and SHA-256 checksums. Verify the download with `shasum -a 256 -c Edimax-EU-4308-macOS-0.1.1.zip.sha256`.
+Includes a universal arm64/x86_64 executable targeting macOS 14+, both Finder scripts, service helper/definition, license, source revision, and SHA-256 checksums. Verify the download with `shasum -a 256 -c Edimax-EU-4308-macOS-0.1.2.zip.sha256`.
 
-Automated sanitizer, installer, package, locking, rollback, location, recovery, and diagnostic tests pass. On macOS 27.2 / Apple Silicon, the binary ZIP passed protected installation, forced-kill recovery, uninstall/reinstall, preserved static settings, checked PHY diagnostics, and LAN-bound IPv4/IPv6 HTTPS. One post-crash RX error recovered through an automatic USB-session restart. Intel, older macOS versions, first-download Gatekeeper approval, physical reconnection, sleep/wake, VPNs, and sustained throughput remain untested. A forced kill between interface creation and ownership recording requires manual inspection.
+Automated sanitizer, installer, staging, locking, rollback, location, recovery, package, and diagnostic tests pass. On macOS 27.3 / Apple Silicon, live hardware validation passed event-driven USB hotplug, 1000 Mbps full-duplex negotiation, DHCP IPv4, SLAAC/DHCPv6 IPv6, and multi-megabyte IPv4/IPv6 HTTPS transfers over `feth0` (>460k packets, 0 RX/TX errors, 0 idle log lines). Intel, older macOS versions, first-download Gatekeeper approval, sleep/wake, VPNs, and multi-hour sustained load remain untested. A forced kill between interface creation and ownership recording requires manual inspection.
 
 **Signing:** ad-hoc signed, without Developer ID or Apple notarization; [Gatekeeper may require explicit approval](https://support.apple.com/en-us/102445). The BPF/feth architecture remains experimental; this package contains no DriverKit extension.
