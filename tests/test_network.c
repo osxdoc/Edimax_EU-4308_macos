@@ -4,17 +4,27 @@
 #include <stdio.h>
 #include <unistd.h>
 static SCPreferencesRef store;
-static unsigned commits, applies;
-static Boolean fail_commit, fail_apply;
+static unsigned commits, applies, syncs;
+static Boolean fail_commit, fail_apply, stale_lock_once, fail_lock;
 static SCPreferencesRef test_preferences(CFAllocatorRef a, CFStringRef n, CFStringRef p) {
     (void)a; (void)n; (void)p; return (SCPreferencesRef)CFRetain(store);
 }
-static Boolean test_lock(SCPreferencesRef p) { (void)p; return true; }
+static Boolean test_lock(SCPreferencesRef p) {
+    (void)p;
+    if (fail_lock) return false;
+    if (stale_lock_once) { stale_lock_once = false; return false; }
+    return true;
+}
+static Boolean test_unlock(SCPreferencesRef p) { (void)p; return true; }
+static int test_sc_error(void) { return !fail_lock ? kSCStatusStale : kSCStatusFailed; }
+static void test_sync(SCPreferencesRef p) { (void)p; syncs++; }
 static Boolean test_commit(SCPreferencesRef p) { (void)p; commits++; return !fail_commit; }
 static Boolean test_apply(SCPreferencesRef p) { (void)p; applies++; return !fail_apply; }
 #define SCPreferencesCreate test_preferences
 #define SCPreferencesLock(p,w) test_lock(p)
-#define SCPreferencesUnlock test_lock
+#define SCPreferencesUnlock test_unlock
+#define SCPreferencesSynchronize test_sync
+#define SCError test_sc_error
 #define SCPreferencesCommitChanges test_commit
 #define SCPreferencesApplyChanges test_apply
 #define main driver_main
@@ -42,7 +52,14 @@ int main(void) {
     assert(commits == 0 && applies == 0 && CFEqual(before, SCPreferencesGetValue(store, CFSTR("NetworkServices"))));
     assert(configure_network_service(-1) == 0);
     assert(!SCNetworkServiceGetEnabled(active) && SCNetworkServiceGetEnabled(first));
+    unsigned old_commits = commits;
+    // Disabled existing services warn without triggering a launchd crash loop or mutating settings.
+    assert(configure_network_service(0) == 0 && !SCNetworkServiceGetEnabled(active) && commits == old_commits);
+    stale_lock_once = true;
+    assert(configure_network_service(0) == 0 && syncs == 1);
+    fail_lock = true;
     assert(configure_network_service(0) == -1);
+    fail_lock = false;
     assert(configure_network_service(1) == 0 && SCNetworkServiceGetEnabled(active));
     fail_commit = true;
     unsigned old_applies = applies;
@@ -60,6 +77,7 @@ int main(void) {
     assert(SCPreferencesRemoveValue(store, CFSTR("NetworkServices")));
     assert(SCPreferencesPathRemoveValue(store, CFSTR("/Sets/Office/Network/Service")));
     assert(SCPreferencesPathRemoveValue(store, CFSTR("/Sets/Home/Network/Service")));
+    assert(configure_network_service(0) == -1);
     assert(configure_network_service(1) == 0);
     active = copy_feth_service(store, NULL);
     assert(active);

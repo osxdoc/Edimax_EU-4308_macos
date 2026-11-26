@@ -6,10 +6,12 @@
 #include <errno.h>
 #include <signal.h>
 #include <pthread.h>
+#include <poll.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <spawn.h>
+#include <dispatch/dispatch.h>
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
@@ -94,9 +96,10 @@
 #define MAX_FRAME_SIZE          1518
 
 #define USB_RX_BUF_SIZE         65536
-#define BPF_BUF_SIZE            65536
+#define BPF_BUF_SIZE            262144
 
 static volatile sig_atomic_t g_running = 1;
+static int g_wakeup_fd[2] = {-1, -1};
 static atomic_bool g_session_active;
 static atomic_bool g_link_ready;
 static IOUSBDeviceInterface182 **g_dev;
@@ -107,17 +110,21 @@ static int g_bpf_fd = -1;
 static u_int g_bpf_buf_size;
 static atomic_uint_fast64_t g_rx_packets, g_rx_bytes, g_tx_packets, g_tx_bytes;
 static atomic_uint_fast64_t g_rx_errors, g_tx_errors;
-extern char **environ;
 
 static void sig_handler(int sig) {
     (void)sig;
     g_running = 0;
+    if (g_wakeup_fd[1] >= 0) {
+        ssize_t unused = write(g_wakeup_fd[1], "", 1);
+        (void)unused;
+    }
 }
 
 static int run_ifconfig(const char *interface, const char *action, const char *value) {
     char *args[] = { "/sbin/ifconfig", (char *)interface, (char *)action, (char *)value, NULL };
+    char *env[] = { "PATH=/usr/sbin:/sbin:/usr/bin:/bin", NULL };
     pid_t pid;
-    int rc = posix_spawn(&pid, args[0], NULL, NULL, args, environ);
+    int rc = posix_spawn(&pid, args[0], NULL, NULL, args, env);
     if (rc != 0) {
         fprintf(stderr, "[-] ifconfig: %s\n", strerror(rc));
         return -1;
@@ -260,6 +267,7 @@ static uint32_t read_le32(const uint8_t *data) {
 }
 
 static int forward_rx_packets(const uint8_t *data, size_t length) {
+    if (length == 0) return 0;
     if (length < 4) return -1;
     uint32_t trailer = read_le32(data + length - 4);
     size_t count = trailer & 0xffff, headers = trailer >> 16, offset = 0;
@@ -358,13 +366,10 @@ static void *tx_worker_thread(void *arg) {
         return NULL;
     }
     while (g_session_active) {
-        fd_set fds;
-        FD_ZERO(&fds);
-        FD_SET(g_bpf_fd, &fds);
-        struct timeval timeout = { .tv_usec = 100000 };
-        int ready = select(g_bpf_fd + 1, &fds, NULL, NULL, &timeout);
+        struct pollfd pfd = { .fd = g_bpf_fd, .events = POLLIN };
+        int ready = poll(&pfd, 1, 100);
         if (ready == 0 || (ready < 0 && errno == EINTR)) continue;
-        if (ready < 0) { perror("[-] BPF select"); g_session_active = false; break; }
+        if (ready < 0) { perror("[-] BPF poll"); g_session_active = false; break; }
         ssize_t length = read(g_bpf_fd, buffer, g_bpf_buf_size);
         if (length < 0 && (errno == EAGAIN || errno == EINTR)) continue;
         if (length <= 0) { perror("[-] BPF read"); g_session_active = false; break; }
@@ -385,7 +390,7 @@ static void *tx_worker_thread(void *arg) {
             if (kr == kIOReturnSuccess) {
                 g_tx_packets++;
                 g_tx_bytes += frame_length < 60 ? 60 : frame_length;
-            } else {
+            } else if (g_session_active && g_link_ready) {
                 fprintf(stderr, "[-] USB TX failed: 0x%08x; restarting session\n", kr);
                 g_tx_errors++;
                 g_session_active = false;
@@ -396,7 +401,7 @@ static void *tx_worker_thread(void *arg) {
     return NULL;
 }
 
-static IOUSBDeviceInterface182 **find_and_open_device(void) {
+static CFMutableDictionaryRef create_device_matching(void) {
     CFMutableDictionaryRef matching = IOServiceMatching(kIOUSBDeviceClassName);
     if (!matching) return NULL;
     SInt32 vendor = 0x0b95, product = 0x1790;
@@ -412,21 +417,62 @@ static IOUSBDeviceInterface182 **find_and_open_device(void) {
     CFDictionarySetValue(matching, CFSTR(kUSBProductID), p);
     CFRelease(v);
     CFRelease(p);
+    return matching;
+}
+
+static void drain_iterator(io_iterator_t iterator) {
+    io_service_t service;
+    while ((service = IOIteratorNext(iterator))) IOObjectRelease(service);
+}
+
+static void usb_device_added(void *refcon, io_iterator_t iterator) {
+    (void)refcon;
+    drain_iterator(iterator);
+    if (g_wakeup_fd[1] >= 0) {
+        ssize_t unused = write(g_wakeup_fd[1], "", 1);
+        (void)unused;
+    }
+}
+
+static void drain_wakeup(void) {
+    if (g_wakeup_fd[0] < 0) return;
+    char buf[32];
+    while (read(g_wakeup_fd[0], buf, sizeof(buf)) > 0) {}
+}
+
+static void wait_wakeup(int timeout_ms) {
+    if (g_wakeup_fd[0] < 0) {
+        if (timeout_ms > 0) usleep((useconds_t)timeout_ms * 1000);
+        return;
+    }
+    struct pollfd pfd = { .fd = g_wakeup_fd[0], .events = POLLIN };
+    if (poll(&pfd, 1, timeout_ms) > 0) drain_wakeup();
+}
+
+static IOUSBDeviceInterface182 **find_and_open_device(bool *matched, IOReturn *open_error) {
+    if (matched) *matched = false;
+    if (open_error) *open_error = KERN_SUCCESS;
+    CFMutableDictionaryRef matching = create_device_matching();
+    if (!matching) return NULL;
     io_iterator_t iterator;
     if (IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iterator) != KERN_SUCCESS) return NULL;
     IOUSBDeviceInterface182 **dev = NULL;
     io_service_t service;
     while ((service = IOIteratorNext(iterator))) {
+        if (matched) *matched = true;
         IOCFPlugInInterface **plugin = NULL;
         SInt32 score;
         IOReturn kr = IOCreatePlugInInterfaceForService(service, kIOUSBDeviceUserClientTypeID,
                                                        kIOCFPlugInInterfaceID, &plugin, &score);
         IOObjectRelease(service);
-        if (kr != KERN_SUCCESS || !plugin) continue;
+        if (kr != KERN_SUCCESS || !plugin) { if (open_error) *open_error = kr; continue; }
         HRESULT result = (*plugin)->QueryInterface(plugin, CFUUIDGetUUIDBytes(kIOUSBDeviceInterfaceID182), (LPVOID *)&dev);
         (*plugin)->Release(plugin);
         if (result != S_OK || !dev) continue;
-        if ((*dev)->USBDeviceOpen(dev) == KERN_SUCCESS) break;
+        kr = (*dev)->USBDeviceOpen(dev);
+        if (kr == kIOReturnExclusiveAccess) kr = (*dev)->USBDeviceOpenSeize(dev);
+        if (kr == KERN_SUCCESS) break;
+        if (open_error) *open_error = kr;
         (*dev)->Release(dev);
         dev = NULL;
     }
@@ -475,7 +521,11 @@ static IOUSBInterfaceInterface550 **claim_interface(void) {
                     }
                 }
             }
-            if (g_bulk_in && g_bulk_out && g_max_packet) break;
+            if (g_bulk_in && g_bulk_out && g_max_packet) {
+                (*interface)->ClearPipeStallBothEnds(interface, g_bulk_in);
+                (*interface)->ClearPipeStallBothEnds(interface, g_bulk_out);
+                break;
+            }
             (*interface)->USBInterfaceClose(interface);
         }
         (*interface)->Release(interface);
@@ -486,15 +536,19 @@ static IOUSBInterfaceInterface550 **claim_interface(void) {
 }
 
 static uint16_t medium_for_link(uint16_t physr) {
-    uint16_t mode = AX_MEDIUM_RECEIVE_EN | AX_MEDIUM_TXFLOW_CTRLEN | AX_MEDIUM_RXFLOW_CTRLEN;
+    uint16_t mode = AX_MEDIUM_RECEIVE_EN;
     if ((physr & GMII_PHY_PHYSR_SMASK) == GMII_PHY_PHYSR_GIGA) mode |= AX_MEDIUM_GIGAMODE | AX_MEDIUM_EN_125MHZ;
     else if ((physr & GMII_PHY_PHYSR_SMASK) == GMII_PHY_PHYSR_100) mode |= AX_MEDIUM_PS;
-    if (physr & GMII_PHY_PHYSR_FULL) mode |= AX_MEDIUM_FULL_DUPLEX;
+    if (physr & GMII_PHY_PHYSR_FULL) mode |= AX_MEDIUM_FULL_DUPLEX | AX_MEDIUM_TXFLOW_CTRLEN | AX_MEDIUM_RXFLOW_CTRLEN;
     return mode;
 }
 
 static bool link_is_up(uint16_t bmsr, uint16_t physr) {
     return (bmsr & BMSR_LSTATUS) && (physr & GMII_PHY_PHYSR_LINK);
+}
+
+static bool link_bounced(int previous_mode, uint16_t bmsr_latched) {
+    return previous_mode > 0 && !(bmsr_latched & BMSR_LSTATUS);
 }
 
 static int program_link(uint16_t physr) {
@@ -520,17 +574,18 @@ static int initialize_device(uint8_t mac[6]) {
         (*g_dev)->GetConfiguration(g_dev, &configuration) != KERN_SUCCESS) return -1;
     if (configuration != descriptor->bConfigurationValue &&
         (*g_dev)->SetConfiguration(g_dev, descriptor->bConfigurationValue) != KERN_SUCCESS) return -1;
-    if (ax_read_cmd(AX_ACCESS_MAC, AX_NODE_ID, 6, 6, mac) != 0) return -1;
-    if ((mac[0] & 1) || !(mac[0] | mac[1] | mac[2] | mac[3] | mac[4] | mac[5])) {
-        fprintf(stderr, "[-] Invalid factory MAC address\n");
-        return -1;
-    }
-    if (ax_write_word(AX_ACCESS_MAC, AX_PHYPWR_RSTCTL, 2, 0) != 0 ||
+    if (ax_write_word(AX_ACCESS_MAC, AX_RX_CTL, 2, 0) != 0 ||
+        ax_write_word(AX_ACCESS_MAC, AX_PHYPWR_RSTCTL, 2, 0) != 0 ||
         ax_write_word(AX_ACCESS_MAC, AX_PHYPWR_RSTCTL, 2, AX_PHYPWR_RSTCTL_IPRL) != 0) return -1;
     usleep(500000);
     uint8_t clock = AX_CLK_SELECT_ACS | AX_CLK_SELECT_BCS;
     if (ax_write_cmd(AX_ACCESS_MAC, AX_CLK_SELECT, 1, 1, &clock) != 0) return -1;
     usleep(200000);
+    if (ax_read_cmd(AX_ACCESS_MAC, AX_NODE_ID, 6, 6, mac) != 0) return -1;
+    if ((mac[0] & 1) || !(mac[0] | mac[1] | mac[2] | mac[3] | mac[4] | mac[5])) {
+        fprintf(stderr, "[-] Invalid factory MAC address\n");
+        return -1;
+    }
     uint8_t low = 0x34, high = 0x52, checksum = 0;
     if (ax_write_cmd(AX_ACCESS_MAC, AX_PAUSE_WATERLVL_LOW, 1, 1, &low) != 0 ||
         ax_write_cmd(AX_ACCESS_MAC, AX_PAUSE_WATERLVL_HIGH, 1, 1, &high) != 0 ||
@@ -565,10 +620,14 @@ static int configure_network_service(int mode) {
     bool install = mode > 0;
     SCPreferencesRef prefs = SCPreferencesCreate(NULL, CFSTR("Edimax AX88179"), NULL);
     if (!prefs) return -1;
-    if (!SCPreferencesLock(prefs, true)) { CFRelease(prefs); return -1; }
+    if (!SCPreferencesLock(prefs, true)) {
+        if (SCError() != kSCStatusStale) { CFRelease(prefs); return -1; }
+        SCPreferencesSynchronize(prefs);
+        if (!SCPreferencesLock(prefs, true)) { CFRelease(prefs); return -1; }
+    }
     SCNetworkSetRef set = SCNetworkSetCopyCurrent(prefs);
     SCNetworkServiceRef service = set ? copy_feth_service(prefs, set) : NULL;
-    if (!service && mode != 0) service = copy_feth_service(prefs, NULL);
+    if (!service) service = copy_feth_service(prefs, NULL);
     int result = -1;
     bool changed = false;
     if (!set) goto done;
@@ -605,12 +664,18 @@ static int configure_network_service(int mode) {
     bool present = current && CFArrayContainsValue(current, CFRangeMake(0, CFArrayGetCount(current)), service);
     if (current) CFRelease(current);
     if (!present) {
-        if (!install || !SCNetworkSetAddService(set, service)) goto done;
+        if (!install) {
+            fprintf(stderr, "[!] The feth0 network service is not in the active location; add or enable it in Network settings to use LAN.\n");
+            result = 0;
+            goto done;
+        }
+        if (!SCNetworkSetAddService(set, service)) goto done;
         changed = true;
     }
     if (!SCNetworkServiceGetEnabled(service)) {
         if (!install) {
-            fprintf(stderr, "[-] The feth0 network service is disabled. Enable it in Network settings to use LAN.\n");
+            fprintf(stderr, "[!] The feth0 network service is disabled. Enable it in Network settings to use LAN.\n");
+            result = 0;
             goto done;
         }
         if (!SCNetworkServiceSetEnabled(service, true)) goto done;
@@ -625,6 +690,17 @@ done:
     SCPreferencesUnlock(prefs);
     CFRelease(prefs);
     return result;
+}
+
+static void log_stats_if_changed(uint64_t *last_total) {
+    uint64_t rx = g_rx_packets, tx = g_tx_packets, rx_err = g_rx_errors, tx_err = g_tx_errors;
+    uint64_t total = rx + tx + rx_err + tx_err;
+    if (total != *last_total) {
+        printf("[STATS] RX=%llu TX=%llu RX-errors=%llu TX-errors=%llu\n",
+               (unsigned long long)rx, (unsigned long long)tx,
+               (unsigned long long)rx_err, (unsigned long long)tx_err);
+        *last_total = total;
+    }
 }
 
 int main(int argc, char **argv) {
@@ -657,19 +733,39 @@ int main(int argc, char **argv) {
         close(lock);
         return 1;
     }
+    if (pipe(g_wakeup_fd) == 0) {
+        for (int i = 0; i < 2; i++) {
+            fcntl(g_wakeup_fd[i], F_SETFL, O_NONBLOCK);
+            fcntl(g_wakeup_fd[i], F_SETFD, FD_CLOEXEC);
+        }
+    }
+    signal(SIGPIPE, SIG_IGN);
     struct sigaction action = { .sa_handler = sig_handler };
     sigemptyset(&action.sa_mask);
-    if (sigaction(SIGINT, &action, NULL) < 0 || sigaction(SIGTERM, &action, NULL) < 0) {
+    if (sigaction(SIGINT, &action, NULL) < 0 || sigaction(SIGTERM, &action, NULL) < 0 ||
+        sigaction(SIGHUP, &action, NULL) < 0) {
         perror("[-] Install signal handlers");
+        if (g_wakeup_fd[0] >= 0) { close(g_wakeup_fd[0]); close(g_wakeup_fd[1]); }
         close(lock);
         return 1;
     }
     setvbuf(stdout, NULL, _IOLBF, 0);
     unsigned owned[2] = {0};
     int result = 1;
-    if (recover_stale_interfaces(lock, &boot) != 0) { close(lock); return 1; }
+    IONotificationPortRef notify_port = NULL;
+    dispatch_queue_t notify_queue = NULL;
+    io_iterator_t notify_iter = IO_OBJECT_NULL;
+    if (recover_stale_interfaces(lock, &boot) != 0) {
+        if (g_wakeup_fd[0] >= 0) { close(g_wakeup_fd[0]); close(g_wakeup_fd[1]); }
+        close(lock);
+        return 1;
+    }
     if (save_interface_state(lock, &boot, owned) != 0) goto cleanup;
-    if (cleanup_interfaces) { close(lock); return 0; }
+    if (cleanup_interfaces) {
+        if (g_wakeup_fd[0] >= 0) { close(g_wakeup_fd[0]); close(g_wakeup_fd[1]); }
+        close(lock);
+        return 0;
+    }
     if (configure_network_service(0) != 0) goto cleanup;
     // shortcut: a kill between create and ownership recording requires manual inspection; never guess ownership.
     if (run_ifconfig("feth0", "create", NULL) != 0) goto cleanup;
@@ -681,18 +777,53 @@ int main(int argc, char **argv) {
     if (run_ifconfig("feth0", "up", NULL) != 0 || run_ifconfig("feth1", "up", NULL) != 0) goto cleanup;
     g_bpf_fd = open_bpf_on_interface("feth1");
     if (g_bpf_fd < 0) { perror("[-] Open BPF"); goto cleanup; }
+    bool hotplug_armed = false;
+    notify_port = IONotificationPortCreate(kIOMainPortDefault);
+    notify_queue = dispatch_queue_create("com.edimax.ax88179.hotplug", DISPATCH_QUEUE_SERIAL);
+    if (notify_port && notify_queue && g_wakeup_fd[0] >= 0) {
+        IONotificationPortSetDispatchQueue(notify_port, notify_queue);
+        CFMutableDictionaryRef matching = create_device_matching();
+        if (matching && IOServiceAddMatchingNotification(notify_port, kIOFirstMatchNotification, matching,
+                                                         usb_device_added, NULL, &notify_iter) == KERN_SUCCESS) {
+            drain_iterator(notify_iter);
+            hotplug_armed = true;
+        }
+    }
     printf("[*] Experimental AX88179 userspace driver; routing and DNS are managed by macOS.\n");
+    bool waiting_logged = false, init_failed_logged = false;
+    IOReturn last_open_error = KERN_SUCCESS;
+    uint64_t last_stats_total = 0;
     while (g_running) {
-        printf("[*] Waiting for AX88179 USB adapter...\n");
-        while (g_running && !(g_dev = find_and_open_device())) sleep(1);
+        bool matched = false;
+        IOReturn open_error = KERN_SUCCESS;
+        while (g_running) {
+            drain_wakeup();
+            g_dev = find_and_open_device(&matched, &open_error);
+            if (g_dev) break;
+            if (matched && open_error != KERN_SUCCESS && open_error != last_open_error) {
+                fprintf(stderr, "[-] Cannot open AX88179 USB device: 0x%08x; retrying.\n", open_error);
+                last_open_error = open_error;
+            }
+            if (!waiting_logged) {
+                printf("[*] Waiting for AX88179 USB adapter...\n");
+                waiting_logged = true;
+            }
+            wait_wakeup(matched || !hotplug_armed ? 1000 : -1);
+        }
         if (!g_running) break;
+        last_open_error = KERN_SUCCESS;
         uint8_t mac[6];
         pthread_t rx_thread, tx_thread;
-        bool rx_started = false, tx_started = false;
+        bool rx_started = false, tx_started = false, peered = false;
         if (initialize_device(mac) != 0 || !(g_intf = claim_interface())) {
-            fprintf(stderr, "[-] USB initialization failed; retrying.\n");
+            if (!init_failed_logged) {
+                fprintf(stderr, "[-] USB initialization failed; retrying.\n");
+                init_failed_logged = true;
+            }
             goto end_session;
         }
+        waiting_logged = false;
+        init_failed_logged = false;
         char address[18];
         snprintf(address, sizeof(address), "%02x:%02x:%02x:%02x:%02x:%02x",
                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
@@ -708,42 +839,52 @@ int main(int argc, char **argv) {
         int previous_mode = -1;
         unsigned tick = 0;
         while (g_running && g_session_active) {
-            uint16_t bmsr, physr;
-            if (ax_mdio_read(MII_BMSR, &bmsr) != 0 || ax_mdio_read(MII_BMSR, &bmsr) != 0 ||
+            uint16_t bmsr_latched, bmsr, physr;
+            if (ax_mdio_read(MII_BMSR, &bmsr_latched) != 0 || ax_mdio_read(MII_BMSR, &bmsr) != 0 ||
                 ax_mdio_read(GMII_PHY_PHYSR, &physr) != 0) break;
             bool link = link_is_up(bmsr, physr);
             int mode = link ? medium_for_link(physr) : 0;
-            if (mode != previous_mode) {
+            bool bounced = link_bounced(previous_mode, bmsr_latched);
+            if (mode != previous_mode || bounced) {
                 g_link_ready = false;
-                if (previous_mode > 0 && run_ifconfig("feth0", "-peer", NULL) != 0) break;
+                if (peered) {
+                    if (run_ifconfig("feth0", "-peer", NULL) != 0) break;
+                    peered = false;
+                    if (bounced && link) usleep(100000);
+                }
                 if (link) {
                     if (program_link(physr) != 0 || ioctl(g_bpf_fd, BIOCFLUSH, NULL) < 0) break;
                     g_link_ready = true;
                     if (run_ifconfig("feth0", "peer", "feth1") != 0) { g_link_ready = false; break; }
-                    printf("[LINK] %s Mbps %s-duplex\n",
+                    peered = true;
+                    printf("[LINK] %s Mbps %s-duplex%s\n",
                            (mode & AX_MEDIUM_GIGAMODE) ? "1000" : (mode & AX_MEDIUM_PS) ? "100" : "10",
-                           (mode & AX_MEDIUM_FULL_DUPLEX) ? "full" : "half");
+                           (mode & AX_MEDIUM_FULL_DUPLEX) ? "full" : "half",
+                           bounced ? " (reconnected)" : "");
                 } else {
                     if (ax_write_word(AX_ACCESS_MAC, AX_MEDIUM_STATUS_MODE, 2, 0) != 0) break;
                     printf("[LINK] No carrier; virtual Ethernet disconnected.\n");
                 }
                 previous_mode = mode;
             }
-            if (++tick % 10 == 0) printf("[STATS] RX=%llu TX=%llu RX-errors=%llu TX-errors=%llu\n",
-                (unsigned long long)g_rx_packets, (unsigned long long)g_tx_packets,
-                (unsigned long long)g_rx_errors, (unsigned long long)g_tx_errors);
-            sleep(1);
+            if (++tick % 60 == 0) log_stats_if_changed(&last_stats_total);
+            wait_wakeup(1000);
         }
 end_session:
         g_link_ready = false;
         g_session_active = false;
-        int disconnected = run_ifconfig("feth0", "-peer", NULL);
+        int disconnected = peered ? run_ifconfig("feth0", "-peer", NULL) : 0;
         if (g_intf) {
             (*g_intf)->AbortPipe(g_intf, g_bulk_in);
             (*g_intf)->AbortPipe(g_intf, g_bulk_out);
         }
         if (rx_started) pthread_join(rx_thread, NULL);
         if (tx_started) pthread_join(tx_thread, NULL);
+        if (rx_started) log_stats_if_changed(&last_stats_total);
+        if (!g_running && g_intf) {
+            (void)ax_write_word(AX_ACCESS_MAC, AX_RX_CTL, 2, 0);
+            (void)ax_write_word(AX_ACCESS_MAC, AX_MEDIUM_STATUS_MODE, 2, 0);
+        }
         if (g_intf) {
             (*g_intf)->USBInterfaceClose(g_intf);
             (*g_intf)->Release(g_intf);
@@ -753,10 +894,21 @@ end_session:
         (*g_dev)->Release(g_dev);
         g_dev = NULL;
         if (disconnected != 0) goto cleanup;
-        if (g_running) sleep(1);
+        if (g_running) wait_wakeup(1000);
     }
     result = 0;
 cleanup:
+    if (notify_iter) IOObjectRelease(notify_iter);
+    if (notify_port) {
+        IONotificationPortSetDispatchQueue(notify_port, NULL);
+        IONotificationPortDestroy(notify_port);
+    }
+    if (notify_queue) dispatch_release(notify_queue);
+    if (g_wakeup_fd[0] >= 0) {
+        close(g_wakeup_fd[0]);
+        close(g_wakeup_fd[1]);
+        g_wakeup_fd[0] = g_wakeup_fd[1] = -1;
+    }
     if (g_dev) {
         (*g_dev)->USBDeviceClose(g_dev);
         (*g_dev)->Release(g_dev);

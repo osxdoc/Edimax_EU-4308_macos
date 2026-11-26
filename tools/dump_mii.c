@@ -17,16 +17,17 @@
 #define GENERAL_STATUS          0x03
 
 static int ax_read_cmd(IOUSBDeviceInterface182 **dev, uint8_t cmd, uint16_t value, uint16_t index, uint16_t len, void *data) {
-    IOUSBDevRequest req;
-    memset(&req, 0, sizeof(req));
+    IOUSBDevRequestTO req = {0};
     req.bmRequestType = 0xC0;
     req.bRequest = cmd;
     req.wValue = value;
     req.wIndex = index;
     req.wLength = len;
     req.pData = data;
-    kern_return_t kr = (*dev)->DeviceRequest(dev, &req);
-    if (kr != KERN_SUCCESS || req.wLenDone != len) {
+    req.noDataTimeout = 500;
+    req.completionTimeout = 1000;
+    IOReturn kr = (*dev)->DeviceRequestTO(dev, &req);
+    if (kr != kIOReturnSuccess || req.wLenDone != len) {
         fprintf(stderr, "USB request reg=0x%04x failed: 0x%08x (%u/%u bytes)\n", value, kr, req.wLenDone, len);
         return -1;
     }
@@ -34,16 +35,17 @@ static int ax_read_cmd(IOUSBDeviceInterface182 **dev, uint8_t cmd, uint16_t valu
 }
 
 static int ax_write_cmd(IOUSBDeviceInterface182 **dev, uint8_t cmd, uint16_t value, uint16_t index, uint16_t len, const void *data) {
-    IOUSBDevRequest req;
-    memset(&req, 0, sizeof(req));
+    IOUSBDevRequestTO req = {0};
     req.bmRequestType = 0x40;
     req.bRequest = cmd;
     req.wValue = value;
     req.wIndex = index;
     req.wLength = len;
     req.pData = (void *)data;
-    kern_return_t kr = (*dev)->DeviceRequest(dev, &req);
-    if (kr != KERN_SUCCESS || req.wLenDone != len) {
+    req.noDataTimeout = 500;
+    req.completionTimeout = 1000;
+    IOReturn kr = (*dev)->DeviceRequestTO(dev, &req);
+    if (kr != kIOReturnSuccess || req.wLenDone != len) {
         fprintf(stderr, "USB request reg=0x%04x failed: 0x%08x (%u/%u bytes)\n", value, kr, req.wLenDone, len);
         return -1;
     }
@@ -82,7 +84,11 @@ int main(void) {
     if (kr != KERN_SUCCESS) return 1;
 
     io_service_t usbDeviceRef = IOIteratorNext(iterator);
-    if (!usbDeviceRef) { IOObjectRelease(iterator); return 1; }
+    if (!usbDeviceRef) {
+        fprintf(stderr, "No AX88179 USB adapter found.\n");
+        IOObjectRelease(iterator);
+        return 1;
+    }
 
     IOCFPlugInInterface **plugInInterface = NULL;
     SInt32 score;
@@ -96,16 +102,30 @@ int main(void) {
     (*plugInInterface)->Release(plugInInterface);
     if (!dev) return 1;
 
-    if ((*dev)->USBDeviceOpen(dev) != KERN_SUCCESS) { (*dev)->Release(dev); return 1; }
+    IOReturn open_kr = (*dev)->USBDeviceOpen(dev);
+    if (open_kr == kIOReturnExclusiveAccess) open_kr = (*dev)->USBDeviceOpenSeize(dev);
+    if (open_kr != KERN_SUCCESS) {
+        fprintf(stderr, "Cannot open AX88179 USB device (0x%08x); stop edimax_driver first if running.\n", open_kr);
+        (*dev)->Release(dev);
+        return 1;
+    }
     int result = 1;
 
-    // Power up PHY
-    uint16_t pwr = OSSwapHostToLittleInt16(AX_PHYPWR_RSTCTL_IPRL);
-    if (ax_write_cmd(dev, AX_ACCESS_MAC, 0x26, 2, 2, &pwr) != 0) goto done;
-    usleep(100000);
-    uint8_t clk = 0x03;
-    if (ax_write_cmd(dev, AX_ACCESS_MAC, 0x33, 1, 1, &clk) != 0) goto done;
-    usleep(50000);
+    // Power up PHY and MAC clock only if not already active.
+    uint16_t pwr = 0;
+    if (ax_read_cmd(dev, AX_ACCESS_MAC, 0x26, 2, 2, &pwr) != 0) goto done;
+    if (!(OSSwapLittleToHostInt16(pwr) & AX_PHYPWR_RSTCTL_IPRL)) {
+        pwr = OSSwapHostToLittleInt16(AX_PHYPWR_RSTCTL_IPRL);
+        if (ax_write_cmd(dev, AX_ACCESS_MAC, 0x26, 2, 2, &pwr) != 0) goto done;
+        usleep(100000);
+    }
+    uint8_t clk = 0;
+    if (ax_read_cmd(dev, AX_ACCESS_MAC, 0x33, 1, 1, &clk) != 0) goto done;
+    if ((clk & 0x03) != 0x03) {
+        clk = 0x03;
+        if (ax_write_cmd(dev, AX_ACCESS_MAC, 0x33, 1, 1, &clk) != 0) goto done;
+        usleep(50000);
+    }
 
     uint8_t gen_status = 0;
     if (ax_read_cmd(dev, AX_ACCESS_MAC, GENERAL_STATUS, 1, 1, &gen_status) != 0) goto done;

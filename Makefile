@@ -31,7 +31,7 @@ uninstall: $(TARGET)
 	sudo /bin/bash tools/service.sh uninstall
 
 tests/%: tests/%.c edimax_driver.c tools/dump_mii.c
-	$(CC) -O1 -g -Wall -Wextra -fsanitize=address,undefined $< $(LDFLAGS) -o $@
+	$(CC) $(CPPFLAGS) -O1 -g -Wall -Wextra -Werror=unguarded-availability -mmacosx-version-min=14.0 -fsanitize=address,undefined $< $(LDFLAGS) -o $@
 
 test: $(TESTS)
 	@for test in $(TESTS); do ./$$test || exit $$?; done
@@ -45,3 +45,4 @@ package: $(TARGET)
 
 clean:
 	rm -f $(TARGET) $(TOOL_MII) $(TESTS)
+	rm -rf $(addsuffix .dSYM,$(TESTS))

@@ -13,13 +13,16 @@ static void test_link(void) {
     assert(!link_is_up(BMSR_LSTATUS, GMII_PHY_PHYSR_100));
     assert(!link_is_up(0, GMII_PHY_PHYSR_LINK | GMII_PHY_PHYSR_GIGA));
     assert(link_is_up(BMSR_LSTATUS, GMII_PHY_PHYSR_LINK | GMII_PHY_PHYSR_100));
-    uint16_t base = AX_MEDIUM_RECEIVE_EN | AX_MEDIUM_TXFLOW_CTRLEN | AX_MEDIUM_RXFLOW_CTRLEN;
-    assert(medium_for_link(0) == base);
-    assert(medium_for_link(GMII_PHY_PHYSR_100) == (base | AX_MEDIUM_PS));
+    uint16_t flow = AX_MEDIUM_FULL_DUPLEX | AX_MEDIUM_TXFLOW_CTRLEN | AX_MEDIUM_RXFLOW_CTRLEN;
+    assert(medium_for_link(0) == AX_MEDIUM_RECEIVE_EN);
+    assert(medium_for_link(GMII_PHY_PHYSR_100) == (AX_MEDIUM_RECEIVE_EN | AX_MEDIUM_PS));
     assert(medium_for_link(GMII_PHY_PHYSR_100 | GMII_PHY_PHYSR_FULL) ==
-           (base | AX_MEDIUM_PS | AX_MEDIUM_FULL_DUPLEX));
+           (AX_MEDIUM_RECEIVE_EN | AX_MEDIUM_PS | flow));
     assert(medium_for_link(GMII_PHY_PHYSR_GIGA | GMII_PHY_PHYSR_FULL) ==
-           (base | AX_MEDIUM_GIGAMODE | AX_MEDIUM_EN_125MHZ | AX_MEDIUM_FULL_DUPLEX));
+           (AX_MEDIUM_RECEIVE_EN | AX_MEDIUM_GIGAMODE | AX_MEDIUM_EN_125MHZ | flow));
+    assert(!link_bounced(-1, 0) && !link_bounced(0, 0));
+    assert(!link_bounced(AX_MEDIUM_RECEIVE_EN, BMSR_LSTATUS));
+    assert(link_bounced(AX_MEDIUM_RECEIVE_EN, 0));
 }
 
 static void test_tx(void) {
@@ -68,6 +71,7 @@ static void test_rx(void) {
     assert(g_rx_packets == 2 && g_rx_errors == 2);
     put_le32(data + 48, 60 << 16); // Packet overlaps its metadata table.
     assert(forward_rx_packets(data, sizeof(data)) == -1);
+    assert(forward_rx_packets(data, 0) == 0 && g_rx_packets == 2 && g_rx_errors == 2); // USB ZLP.
     assert(forward_rx_packets(data, 3) == -1);
     put_le32(data + 64, (64 << 16) | 4); // Metadata exceeds input.
     assert(forward_rx_packets(data, sizeof(data)) == -1);

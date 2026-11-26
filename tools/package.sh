@@ -20,7 +20,7 @@ chmod 755 "$package/edimax_driver" "$package/Install.command" "$package/Uninstal
 codesign --force --sign - --timestamp=none "$package/edimax_driver"
 codesign --verify --strict --all-architectures "$package/edimax_driver"
 commit=$(git rev-parse --verify HEAD 2>/dev/null || echo unknown)
-if ! git diff --quiet --ignore-submodules HEAD 2>/dev/null; then commit="$commit-dirty"; fi
+if [[ $commit != unknown ]] && ! git diff --quiet --ignore-submodules HEAD 2>/dev/null; then commit="$commit-dirty"; fi
 printf 'Version: %s\nSource commit: %s\nArchitectures: arm64 x86_64\nMinimum macOS: 14.0\nSigning: ad-hoc; no Developer ID or notarization\n' "$version" "$commit" > "$package/BUILD.txt"
 (
     cd "$package"

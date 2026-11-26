@@ -5,8 +5,9 @@
 
 static IOReturn reply_result;
 static UInt32 reply_length;
-static IOReturn reply(void *self, IOUSBDevRequest *request) {
+static IOReturn reply(void *self, IOUSBDevRequestTO *request) {
     (void)self;
+    assert(request->noDataTimeout == 500 && request->completionTimeout == 1000);
     request->wLenDone = reply_length;
     if ((request->bmRequestType & 0x80) && reply_length == 2 && reply_result == kIOReturnSuccess) {
         uint16_t raw = OSSwapHostToLittleInt16(0xabcd);
@@ -16,7 +17,7 @@ static IOReturn reply(void *self, IOUSBDevRequest *request) {
 }
 
 int main(void) {
-    IOUSBDeviceInterface182 table = { .DeviceRequest = reply };
+    IOUSBDeviceInterface182 table = { .DeviceRequestTO = reply };
     IOUSBDeviceInterface182 *device = &table;
     uint16_t value = 0x1234;
     reply_result = kIOReturnNoDevice;

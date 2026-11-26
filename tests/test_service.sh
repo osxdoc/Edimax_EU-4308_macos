@@ -57,6 +57,7 @@ for command in launchctl pgrep pkill sleep chown stat; do ln -s command "$test_r
 cat > "$test_root/repo with spaces/edimax_driver" <<'HELPER'
 #!/bin/bash
 set -eu
+[[ $0 == "$TEST_ROOT/Library/PrivilegedHelperTools/"* ]]
 printf 'helper %s\n' "$*" >> "$TEST_ROOT/events"
 if [[ ${FAIL_AT:-} == "$1" && ! -f $TEST_ROOT/failed ]]; then touch "$TEST_ROOT/failed"; exit 7; fi
 case "$1" in
@@ -152,7 +153,7 @@ bash "$service" uninstall > "$test_root/output" 2>&1
 [[ ! -e $binary && ! -e $plist && ! -e $test_root/loaded ]]
 bash "$service" uninstall > "$test_root/output" 2>&1
 
-# Binary releases fail before running helpers if contents were changed.
+# Binary releases fail before running helpers if contents were changed, even if edimax_driver.c appears.
 rm "$test_root/repo with spaces/edimax_driver.c"
 (cd "$test_root/repo with spaces" && shasum -a 256 edimax_driver tools/service.sh services/*.plist > SHA256SUMS)
 bash "$service" install > "$test_root/output" 2>&1
@@ -160,4 +161,12 @@ printf '\n# corrupt download\n' >> "$test_root/repo with spaces/edimax_driver"
 : > "$test_root/events"
 if bash "$service" install > "$test_root/output" 2>&1; then exit 1; fi
 [[ ! -s $test_root/events && -f $test_root/running ]]
-echo 'Protected paths, locking, rollback, migration, preflight, and release checksums passed.'
+touch "$test_root/repo with spaces/edimax_driver.c"
+if bash "$service" install > "$test_root/output" 2>&1; then exit 1; fi
+[[ ! -s $test_root/events && -f $test_root/running ]]
+
+# Uninstall still works from a cleaned source tree using the protected installed binary.
+rm -f "$test_root/repo with spaces/SHA256SUMS" "$test_root/repo with spaces/edimax_driver"
+bash "$service" uninstall > "$test_root/output" 2>&1
+[[ ! -e $binary && ! -e $plist && ! -e $test_root/loaded ]]
+echo 'Protected paths, staging, locking, rollback, migration, preflight, and release checksums passed.'
